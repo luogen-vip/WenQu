@@ -18,12 +18,16 @@ data class MediaResult(
     val extra: String = ""
 )
 
-/** 引擎实时进度 state: 0进行中 1成功 2失败 3冷却 */
+/**
+ * 引擎实时进度 state: 0进行中 1成功 2失败 3冷却
+ * results：该引擎抓到的条目（截断保存），供点击芯片查看"它搜到了什么"
+ */
 data class EngineProgress(
     val id: String,
     val name: String,
     val state: Int,
-    val count: Int
+    val count: Int,
+    val results: List<WebResult> = emptyList()
 )
 
 /** 引用来源 */
@@ -44,7 +48,7 @@ data class Conv(
     val gameState: String
 )
 
-/** 聊天界面消息 role: 0用户 1AI */
+/** 聊天界面消息 role: 0用户 1AI；query 记录本条回答对应的问题，供"再查查/找图片"按钮带上下文 */
 data class UiMessage(
     val id: Long,
     val role: Int,
@@ -56,5 +60,6 @@ data class UiMessage(
     val images: List<MediaResult> = emptyList(),
     val videos: List<MediaResult> = emptyList(),
     val suggestions: List<String> = emptyList(),
+    val query: String = "",
     val time: Long = System.currentTimeMillis()
 )

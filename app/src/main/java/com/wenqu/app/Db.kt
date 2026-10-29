@@ -127,7 +127,15 @@ object Db {
         val o = JSONObject()
         try {
             val es = JSONArray()
-            m.engineStates.forEach { p -> es.put(JSONObject().put("i", p.id).put("n", p.name).put("s", p.state).put("c", p.count)) }
+            m.engineStates.forEach { p ->
+                val eo = JSONObject().put("i", p.id).put("n", p.name).put("s", p.state).put("c", p.count)
+                val rs = JSONArray()
+                p.results.take(8).forEach { r ->
+                    rs.put(JSONObject().put("t", Nlp.shorten(r.title, 50)).put("u", r.url))
+                }
+                eo.put("r", rs)
+                es.put(eo)
+            }
             o.put("engines", es)
             val ss = JSONArray()
             m.sources.forEach { s -> ss.put(JSONObject().put("t", s.title).put("u", s.url).put("e", s.engine).put("h", s.host)) }
@@ -141,6 +149,7 @@ object Db {
             val sg = JSONArray()
             m.suggestions.forEach { sg.put(it) }
             o.put("suggestions", sg)
+            if (m.query.isNotEmpty()) o.put("query", m.query)
         } catch (_: Exception) {}
         return o.toString()
     }
@@ -151,10 +160,18 @@ object Db {
         var im: List<MediaResult> = emptyList()
         var vs: List<MediaResult> = emptyList()
         var sg: List<String> = emptyList()
+        var qy = ""
         try {
             val o = JSONObject(meta)
+            qy = o.optString("query")
             o.optJSONArray("engines")?.let { a ->
-                es = (0 until a.length()).map { val x = a.getJSONObject(it); EngineProgress(x.optString("i"), x.optString("n"), x.optInt("s"), x.optInt("c")) }
+                es = (0 until a.length()).map {
+                    val x = a.getJSONObject(it)
+                    val rs = x.optJSONArray("r")?.let { ra ->
+                        (0 until ra.length()).map { k -> val w = ra.getJSONObject(k); WebResult(w.optString("t"), "", w.optString("u"), x.optString("n")) }
+                    } ?: emptyList()
+                    EngineProgress(x.optString("i"), x.optString("n"), x.optInt("s"), x.optInt("c"), rs)
+                }
             }
             o.optJSONArray("sources")?.let { a ->
                 ss = (0 until a.length()).map { val x = a.getJSONObject(it); SourceRef(x.optString("t"), x.optString("u"), x.optString("e"), x.optString("h")) }
@@ -169,6 +186,6 @@ object Db {
                 sg = (0 until a.length()).map { a.optString(it) }
             }
         } catch (_: Exception) {}
-        return UiMessage(id, role, text, false, false, es, ss, im, vs, sg, time)
+        return UiMessage(id, role, text, false, false, es, ss, im, vs, sg, qy, time)
     }
 }

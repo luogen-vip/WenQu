@@ -26,13 +26,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -107,10 +113,13 @@ fun AssistantAvatar(size: Int) {
     }
 }
 
-/** 实时搜索进度：每个引擎一颗芯片，进行中转圈、成功绿勾、失败红叉、限流冷却 */
-@OptIn(ExperimentalLayoutApi::class)
+/** 实时搜索进度：每个引擎一颗芯片，进行中转圈、成功绿条数、失败红叉、冷却 */
 @Composable
-fun EngineProgressView(states: List<EngineProgress>, phase: String) {
+fun EngineProgressView(
+    states: List<EngineProgress>,
+    phase: String,
+    onEngineTap: (EngineProgress) -> Unit
+) {
     Column {
         if (phase.isNotEmpty()) {
             Text(phase, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -124,7 +133,9 @@ fun EngineProgressView(states: List<EngineProgress>, phase: String) {
                 states.forEach { p ->
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.surfaceVariant
+                        color = if (p.state == 1) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.combinedClickableBridge { onEngineTap(p) }
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -152,7 +163,7 @@ fun EngineProgressView(states: List<EngineProgress>, phase: String) {
             val ok = states.count { it.state == 1 }
             val total = states.sumOf { it.count }
             Text(
-                "已获取 $total 条结果 · 完成 $ok/${states.size} 路引擎",
+                "已获取 $total 条结果 · 完成 $ok/${states.size} 路 · 点引擎名看它搜到了什么",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -160,18 +171,81 @@ fun EngineProgressView(states: List<EngineProgress>, phase: String) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+/** 单引擎详情：它搜到了哪些网页，点击直达 */
+@Composable
+fun EngineDetailDialog(p: EngineProgress, onDismiss: () -> Unit, onOpenLink: (String) -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.widthIn(max = 340.dp)
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(p.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    when (p.state) {
+                        1 -> Text("搜到 ${p.count} 条", fontSize = 12.sp, color = Color(0xFF16A34A))
+                        2 -> Text("本次没有结果", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                        3 -> Text("限流冷却中", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        else -> Text("搜索中…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                if (p.results.isEmpty()) {
+                    Text(
+                        if (p.state == 1) "该引擎的结果都已并入下方总答案。" else "暂时没有可展示的详情。",
+                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 19.sp
+                    )
+                } else {
+                    Column(
+                        Modifier
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        p.results.forEach { r ->
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .combinedClickableBridge {
+                                        if (r.url.startsWith("http")) {
+                                            onOpenLink(r.url); onDismiss()
+                                        }
+                                    }
+                            ) {
+                                Text(r.title, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(NlpHost.safeHost(r.url), fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        Text("点任意条目可直接打开网页", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("关闭") }
+            }
+        }
+    }
+}
+
+private object NlpHost {
+    fun safeHost(url: String): String = com.wenqu.app.Nlp.hostOf(url).ifEmpty { url.take(40) }
+}
+
 @Composable
 fun MessageItem(
     m: UiMessage,
+    speaking: Boolean,
     onOpenLink: (String) -> Unit,
     onDelete: (Long) -> Unit,
     onReanswer: (Long) -> Unit,
-    onSpeak: (String) -> Unit,
-    onSuggestion: (String) -> Unit,
-    onImageTap: (MediaResult, List<MediaResult>) -> Unit
+    onSpeakToggle: (String) -> Unit,
+    onSend: (String) -> Unit,
+    onImageTap: (MediaResult, List<MediaResult>) -> Unit,
+    onEngineTap: (EngineProgress) -> Unit
 ) {
-    if (m.role == 0) UserBubble(m, onDelete) else AiBubble(m, onOpenLink, onDelete, onReanswer, onSpeak, onSuggestion, onImageTap)
+    if (m.role == 0) UserBubble(m, onDelete)
+    else AiBubble(m, speaking, onOpenLink, onDelete, onReanswer, onSpeakToggle, onSend, onImageTap, onEngineTap)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -223,12 +297,14 @@ private fun UserBubble(m: UiMessage, onDelete: (Long) -> Unit) {
 @Composable
 private fun AiBubble(
     m: UiMessage,
+    speaking: Boolean,
     onOpenLink: (String) -> Unit,
     onDelete: (Long) -> Unit,
     onReanswer: (Long) -> Unit,
-    onSpeak: (String) -> Unit,
-    onSuggestion: (String) -> Unit,
-    onImageTap: (MediaResult, List<MediaResult>) -> Unit
+    onSpeakToggle: (String) -> Unit,
+    onSend: (String) -> Unit,
+    onImageTap: (MediaResult, List<MediaResult>) -> Unit,
+    onEngineTap: (EngineProgress) -> Unit
 ) {
     val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
@@ -254,16 +330,16 @@ private fun AiBubble(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     if (m.searching) {
-                        EngineProgressView(m.engineStates, m.text.ifEmpty { "正在为你翻阅全网，实时进度：" })
+                        EngineProgressView(m.engineStates, m.text.ifEmpty { "正在为你翻阅全网，实时进度：" }, onEngineTap)
                     } else {
                         if (m.text.isNotEmpty()) {
-                            LinkText(m.text, fontSize = 15.sp, onOpenLink = onOpenLink)
+                            LinkText(m.text, fontSize = 15.sp, lineHeight = 22.sp, onOpenLink = onOpenLink)
                         }
                         if (m.streaming) BlinkCursor()
                         if (m.images.isNotEmpty()) ImageRow(m.images, onImageTap, onOpenLink)
                         if (m.videos.isNotEmpty()) VideoList(m.videos, onOpenLink)
                         if (m.sources.isNotEmpty()) SourceChips(m.sources, onOpenLink)
-                        if (m.suggestions.isNotEmpty() && !m.streaming) SuggestionChips(m.suggestions, onSuggestion)
+                        if (m.suggestions.isNotEmpty() && !m.streaming) SuggestionChips(m.suggestions, onSend)
                     }
                 }
             }
@@ -274,29 +350,48 @@ private fun AiBubble(
                 DropdownMenuItem(text = { Text("重新回答") },
                     leadingIcon = { Icon(Icons.Default.Refresh, null, modifier = Modifier.size(17.dp)) },
                     onClick = { menu = false; onReanswer(m.id) })
-                DropdownMenuItem(text = { Text("朗读") },
-                    leadingIcon = { Icon(Icons.Default.VolumeUp, null, modifier = Modifier.size(17.dp)) },
-                    onClick = { menu = false; onSpeak(m.text) })
+                DropdownMenuItem(text = { Text(if (speaking) "停止朗读" else "朗读") },
+                    leadingIcon = {
+                        Icon(if (speaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp, null, modifier = Modifier.size(17.dp))
+                    },
+                    onClick = { menu = false; onSpeakToggle(m.text) })
                 DropdownMenuItem(text = { Text("删除") },
                     leadingIcon = { Icon(Icons.Default.Delete, null, modifier = Modifier.size(17.dp)) },
                     onClick = { menu = false; onDelete(m.id) })
             }
         }
         if (!m.searching && !m.streaming && m.text.isNotEmpty()) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                TextButton(onClick = { onReanswer(m.id) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                    Icon(Icons.Default.Refresh, null, modifier = Modifier.size(14.dp))
-                    Spacer(Modifier.size(4.dp))
-                    Text("重新回答", fontSize = 12.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ActionBtn(Icons.Default.Refresh, "重新回答") { onReanswer(m.id) }
+                if (m.query.isNotEmpty()) {
+                    ActionBtn(Icons.Default.Search, "再查查") { onSend("再查查") }
+                    ActionBtn(Icons.Default.Image, "找图片") { onSend("找${m.query}相关图片") }
                 }
-                IconButton(onClick = { onSpeak(m.text) }, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.VolumeUp, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = { onSpeakToggle(m.text) }, modifier = Modifier.size(30.dp)) {
+                    Icon(
+                        if (speaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                        if (speaking) "停止朗读" else "朗读",
+                        modifier = Modifier.size(16.dp),
+                        tint = if (speaking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 IconButton(onClick = { copyText(ctx, m.text) }, modifier = Modifier.size(30.dp)) {
                     Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ActionBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 7.dp, vertical = 0.dp)
+    ) {
+        Icon(icon, null, modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.size(3.dp))
+        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -315,7 +410,7 @@ fun BlinkCursor() {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SourceChips(sources: List<SourceRefAlias>, onOpenLink: (String) -> Unit) {
+private fun SourceChips(sources: List<com.wenqu.app.SourceRef>, onOpenLink: (String) -> Unit) {
     var showAll by remember { mutableStateOf(false) }
     Column {
         Text("参考来源（点击直达网页）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -361,8 +456,6 @@ private fun SourceChips(sources: List<SourceRefAlias>, onOpenLink: (String) -> U
     }
 }
 
-typealias SourceRefAlias = com.wenqu.app.SourceRef
-
 /** clickable 桥（避免每处都写 @OptIn） */
 @OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.combinedClickableBridge(onClick: () -> Unit): Modifier =
@@ -393,12 +486,13 @@ private fun SuggestionChips(list: List<String>, onSuggestion: (String) -> Unit) 
 @Composable
 private fun ImageRow(images: List<MediaResult>, onImageTap: (MediaResult, List<MediaResult>) -> Unit, onOpenLink: (String) -> Unit) {
     Column {
-        Text("相关图片（全网匹配，点击放大）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("相关图片（点击放大）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(6.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(images) { img ->
                 Surface(
                     shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.combinedClickableBridge { onImageTap(img, images) }
                 ) {
                     Column {
@@ -426,17 +520,18 @@ private fun ImageRow(images: List<MediaResult>, onImageTap: (MediaResult, List<M
 @Composable
 fun ImageDialog(img: MediaResult, onDismiss: () -> Unit, onOpenLink: (String) -> Unit) {
     Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = RoundedCornerShape(18.dp)) {
+        Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.padding(14.dp)) {
-                AsyncImage(
-                    model = img.image,
-                    contentDescription = img.title,
-                    contentScale = ContentScale.FillWidth,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 380.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                )
+                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                    AsyncImage(
+                        model = img.image,
+                        contentDescription = img.title,
+                        contentScale = ContentScale.FillWidth,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp)
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
                 Text(img.title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(4.dp))
@@ -450,6 +545,9 @@ fun ImageDialog(img: MediaResult, onDismiss: () -> Unit, onOpenLink: (String) ->
                         Spacer(Modifier.size(8.dp))
                         TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
                     }
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = onDismiss) { Text("关闭", fontSize = 13.sp) }
                 }
             }
         }
@@ -459,7 +557,7 @@ fun ImageDialog(img: MediaResult, onDismiss: () -> Unit, onOpenLink: (String) ->
 @Composable
 private fun VideoList(videos: List<MediaResult>, onOpenLink: (String) -> Unit) {
     Column {
-        Text("相关视频（点击即可播放）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("相关视频（点击播放）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(6.dp))
         Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
             videos.forEach { v ->
@@ -469,22 +567,19 @@ private fun VideoList(videos: List<MediaResult>, onOpenLink: (String) -> Unit) {
                         .fillMaxWidth()
                         .combinedClickableBridge { onOpenLink(v.page) }
                 ) {
-                    if (v.image.startsWith("http")) {
-                        AsyncImage(
-                            model = v.image, contentDescription = v.title,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(width = 92.dp, height = 58.dp)
-                                .clip(RoundedCornerShape(9.dp))
-                        )
-                    } else {
-                        Box(
-                            Modifier
-                                .size(width = 92.dp, height = 58.dp)
-                                .clip(RoundedCornerShape(9.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center
-                        ) { Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.primary) }
+                    Surface(shape = RoundedCornerShape(9.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                        if (v.image.startsWith("http")) {
+                            AsyncImage(
+                                model = v.image, contentDescription = v.title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(width = 92.dp, height = 58.dp)
+                            )
+                        } else {
+                            Box(
+                                Modifier.size(width = 92.dp, height = 58.dp),
+                                contentAlignment = Alignment.Center
+                            ) { Icon(Icons.Default.PlayArrow, null, tint = MaterialTheme.colorScheme.primary) }
+                        }
                     }
                     Spacer(Modifier.size(9.dp))
                     Column(Modifier.weight(1f)) {

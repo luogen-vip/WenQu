@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -53,26 +54,30 @@ private fun ChatRepo.isInitialized(): Boolean {
     }
 }
 
+/** 导航栈：聊天 → 任何二级页 → 再进网页，系统返回键逐级回退（聊天页是根） */
 @Composable
 private fun AppRoot(onThemeChanged: (Int) -> Unit) {
-    var screen by remember { mutableStateOf<Screen>(Screen.Chat) }
-    when (val s = screen) {
+    val stack = remember { mutableStateListOf<Screen>(Screen.Chat) }
+    val push: (Screen) -> Unit = { stack.add(it) }
+    val pop: () -> Unit = { if (stack.size > 1) stack.removeAt(stack.size - 1) }
+
+    when (val s = stack.last()) {
         is Screen.Chat -> ChatScreen(
-            onOpenQuick = { screen = Screen.QuickSearch },
-            onOpenSettings = { screen = Screen.Settings },
-            onOpenLink = { screen = Screen.Web(it) }
+            onOpenQuick = { push(Screen.QuickSearch) },
+            onOpenSettings = { push(Screen.Settings) },
+            onOpenLink = { push(Screen.Web(it)) }
         )
         is Screen.QuickSearch -> QuickSearchScreen(
-            onBack = { screen = Screen.Chat },
-            onOpenLink = { screen = Screen.Web(it) }
+            onBack = { pop() },
+            onOpenLink = { push(Screen.Web(it)) }
         )
         is Screen.Settings -> SettingsScreen(
-            onBack = { screen = Screen.Chat },
+            onBack = { pop() },
             onThemeChanged = onThemeChanged
         )
         is Screen.Web -> WebViewScreen(
             url = s.url,
-            onClose = { screen = Screen.Chat }
+            onClose = { pop() }
         )
     }
 }

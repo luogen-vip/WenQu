@@ -2,14 +2,15 @@ package com.wenqu.app
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.json.JSONObject
-import java.net.URL
+import java.net.URLEncoder
 
 /**
- * 搜索引擎抓取层。
+ * 搜索引擎抓取层（只保留国内直连可用的引擎，被墙/需登录的已移除）。
  * 每个引擎独立解析；失败自动换 UA 重试一次；解析失败走通用兜底提取器。
  * 上层 Aggregator 会并行调度全部引擎，单个引擎限额/被反爬不影响整体。
  */
@@ -22,38 +23,36 @@ abstract class Engine(val id: String, val name: String, val experimental: Boolea
     open fun referer(): String? = null
     open fun extraHeaders(): Map<String, String> = emptyMap()
     open fun isPost(): Boolean = false
-    open fun postBody(q: String): String = ""
 
+    /** 单引擎整体限时 9 秒：超时立即判失败，绝不拖慢整体进度 */
     open suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
-        var out = emptyList<WebResult>()
-        repeat(2) { attempt ->
-            if (out.isNotEmpty()) return@repeat
-            val target = url(q, 1)
-            val base = target.substringBefore('?')
-            val html = if (isPost())
-                Http.postForm(target, mapOf("q" to q), referer(), if (attempt == 0) Http.randomUA() else Http.mobileUA())
-            else
-                Http.get(target, referer(), if (attempt == 0) Http.randomUA() else Http.mobileUA(), extraHeaders())
-            html ?: return@repeat
-            out = try { parse(Jsoup.parse(html, base), n) } catch (e: Exception) { emptyList() }
+        withTimeout(9000L) {
+            var out = emptyList<WebResult>()
+            repeat(2) { attempt ->
+                if (out.isNotEmpty()) return@repeat
+                val target = url(q, 1)
+                val base = target.substringBefore('?')
+                val html = if (isPost())
+                    Http.postForm(target, mapOf("q" to q), referer(), if (attempt == 0) Http.randomUA() else Http.mobileUA())
+                else
+                    Http.get(target, referer(), if (attempt == 0) Http.randomUA() else Http.mobileUA(), extraHeaders(), callTimeoutSec = 8)
+                html ?: return@repeat
+                out = try { parse(Jsoup.parse(html, base), n) } catch (e: Exception) { emptyList() }
+            }
+            out
         }
-        out
     }
-
-    protected fun collect(doc: Document, name: String, n: Int): MutableList<WebResult> = ArrayList()
 
     companion object {
         /** 通用兜底提取器：从任意 HTML 页面里抓"像结果"的链接（用于结构多变的站点） */
         fun genericExtract(doc: Document, engine: String, n: Int): List<WebResult> {
             val deny = listOf(
-                "google.com", "gstatic.com", "bing.com/acs", "duckduckgo.com", "mojeek.com",
-                "searx", "brave.com", "wikipedia.org/w", "search.yahoo.com", "yandex.com",
-                "baidu.com/s", "sogou.com/web", "so.com/s?", "sm.cn/s?", "toutiao.com/search",
-                "douyin.com/?", "metaso.cn/?", "bilibili.com/", "github.com", "apache.org",
-                "miitbeian", "beian.gov", "example.com", "w3.org", "go.microsoft", "microsoft.com/zh-cn/download",
-                "/login", "/signin", "javascript:"
+                "google.com", "gstatic.com", "bing.com/acs", "baidu.com/s", "baidu.com/link",
+                "sogou.com/web", "so.com/s?", "so.com/link", "sm.cn/s?", "toutiao.com/search",
+                "miitbeian", "beian.gov", "example.com", "w3.org", "go.microsoft",
+                "/login", "/signin", "javascript:", "tel:", "mailto:"
             )
-            val junk = Regex("^(首页|下一页|上一页|登录|注册|下载|客户端|帮助|反馈|关于我们|设置|隐私|更多|贴吧|知道|文库|地图|图片|视频|新闻|网页|资讯|更多结果|Sign in|Sign up|Log in|Next|Previous)$")
+            val junk = Regex("^(首页|下一页|上一页|登录|注册|下载|客户端|帮助|反馈|关于我们|设置|隐私|更多|贴吧|知道|文库|地图|图片|视频|新闻|网页|资讯|更多结果|换一换|正在加载|Sign in|Sign up|Log in|Next|Previous)$")
             val out = ArrayList<WebResult>()
             val seen = HashSet<String>()
             for (a in doc.select("a[href]")) {
@@ -84,7 +83,7 @@ abstract class Engine(val id: String, val name: String, val experimental: Boolea
 
 // ---------------- 各引擎实现 ----------------
 
-class BingEngine(private val base: String = "https://www.bing.com", eid: String = "bing", ename: String = "必应") :
+class BingEngine(private val base: String, eid: String, ename: String) :
     Engine(eid, ename) {
     override val reliability = 0.4
     override fun url(q: String, page: Int) = "$base/search?q=${Nlp.enc(q)}&count=15&setlang=zh-CN&mkt=zh-CN"
@@ -95,7 +94,7 @@ class BingEngine(private val base: String = "https://www.bing.com", eid: String 
             if (out.size >= n) break
             val a = el.selectFirst("h2 a") ?: continue
             val title = a.text().trim()
-            val u = a.absUrl("href")
+            val u = Nlp.unwrapRedirect(a.absUrl("href"))
             if (title.isEmpty() || !u.startsWith("http")) continue
             val sn = el.selectFirst(".b_caption p, p")?.text()?.trim() ?: ""
             out.add(WebResult(title, sn, u, name))
@@ -105,23 +104,53 @@ class BingEngine(private val base: String = "https://www.bing.com", eid: String 
     }
 }
 
+/** 百度移动版：反爬比 PC 版宽松，直链多藏在 data-log 的 mu 字段里 */
 class BaiduEngine : Engine("baidu", "百度") {
-    override val reliability = 0.2
-    override fun url(q: String, page: Int) = "https://www.baidu.com/s?wd=${Nlp.enc(q)}&rn=15&ie=utf-8"
-    override fun referer() = "https://www.baidu.com/"
+    override val reliability = 0.25
+    override fun url(q: String, page: Int) =
+        "https://m.baidu.com/s?word=${URLEncoder.encode(q, "UTF-8")}&sa=ib&from=1000539d&uid=0"
+    override fun referer() = "https://m.baidu.com/"
     override fun extraHeaders() = mapOf(
-        "Cookie" to "BAIDUID=${Http.randomHex(32)}:FG=1; BIDUPSID=${Http.randomHex(32)}; PSTM=${System.currentTimeMillis() / 1000}"
+        "Cookie" to "BAIDUID=${Http.randomHex(32)}:FG=1; BIDUPSID=${Http.randomHex(32)}; PSTM=${System.currentTimeMillis() / 1000}; MAWEBC=1; FACTS=1",
+        "X-Requested-With" to "com.android.browser"
     )
+
+    override suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
+        withTimeout(9000L) {
+            var out = emptyList<WebResult>()
+            repeat(2) { attempt ->
+                if (out.isNotEmpty()) return@repeat
+                val html = Http.get(
+                    url(q, 1), referer(),
+                    if (attempt == 0) Http.mobileUA() else Http.mobileUA(),
+                    extraHeaders(), callTimeoutSec = 8
+                ) ?: return@repeat
+                out = try { parse(Jsoup.parse(html, "https://m.baidu.com/"), n) } catch (e: Exception) { emptyList() }
+            }
+            out
+        }
+    }
+
     override fun parse(doc: Document, n: Int): List<WebResult> {
         val out = ArrayList<WebResult>()
-        for (el in doc.select("div.result, div.c-container")) {
+        for (el in doc.select("div.c-result, div[class*=result], div.c-container")) {
             if (out.size >= n) break
-            val a = el.selectFirst("h3 a") ?: continue
+            val a = el.selectFirst("a[href]") ?: continue
             val title = a.text().trim()
-            val u = a.absUrl("href")
-            if (title.isEmpty() || u.isEmpty()) continue
-            val sn = (el.selectFirst(".c-abstract, span[class*=abstract], div[class*=content-right]")?.text()
-                ?: el.text()).take(200)
+            if (title.isEmpty()) continue
+            var u = a.absUrl("href")
+            if (!u.startsWith("http")) continue
+            // 还原百度跳转链的真实地址（data-log 的 mu 字段）
+            if (u.contains("baidu.com/link") || u.contains("m.baidu.com/from")) {
+                val dl = el.attr("data-log").ifEmpty { el.selectFirst("[data-log]")?.attr("data-log") ?: "" }
+                if (dl.isNotEmpty()) {
+                    runCatching {
+                        val mu = JSONObject(dl).optString("mu")
+                        if (mu.startsWith("http")) u = mu
+                    }
+                }
+            }
+            val sn = el.text().replace(title, " ").replace(Regex("\\s+"), " ").trim().take(220)
             out.add(WebResult(title, sn, u, name))
         }
         if (out.isEmpty()) out.addAll(Engine.genericExtract(doc, name, n))
@@ -194,162 +223,16 @@ class ToutiaoEngine : Engine("toutiao", "头条", experimental = true) {
     }
 }
 
-class DouyinEngine : Engine("douyin", "抖音", experimental = true) {
-    override fun url(q: String, page: Int) = "https://www.douyin.com/search/${Nlp.enc(q)}"
-    override fun referer() = "https://www.douyin.com/"
-    override fun parse(doc: Document, n: Int): List<WebResult> = Engine.genericExtract(doc, name, n)
-}
-
-class MetasoEngine : Engine("metaso", "秘塔AI", experimental = true) {
-    override fun url(q: String, page: Int) = "https://metaso.cn/?q=${Nlp.enc(q)}"
-    override fun referer() = "https://metaso.cn/"
-    override fun parse(doc: Document, n: Int): List<WebResult> {
-        val out = ArrayList<WebResult>()
-        for (el in doc.select("a[href]")) {
-            if (out.size >= n) break
-            val u = el.absUrl("href")
-            val title = el.text().trim()
-            if (u.startsWith("http") && !u.contains("metaso.cn") && title.length in 8..90) {
-                out.add(WebResult(title, "", u, name))
-            }
-        }
-        if (out.isEmpty()) out.addAll(Engine.genericExtract(doc, name, n))
-        return out
-    }
-}
-
-class DdgEngine : Engine("ddg", "DuckDuckGo") {
-    override val reliability = 0.4
-    override fun url(q: String, page: Int) = "https://lite.duckduckgo.com/lite/"
-    override fun referer() = "https://duckduckgo.com/"
-    override fun isPost() = true
-    override fun postBody(q: String) = ""
-    override suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
-        var out = emptyList<WebResult>()
-        repeat(2) { attempt ->
-            if (out.isNotEmpty()) return@repeat
-            val html = Http.postForm(
-                "https://lite.duckduckgo.com/lite/", mapOf("q" to q),
-                "https://duckduckgo.com/", if (attempt == 0) Http.randomUA() else Http.mobileUA()
-            ) ?: return@repeat
-            out = try { parse(Jsoup.parse(html, "https://lite.duckduckgo.com/"), n) } catch (e: Exception) { emptyList() }
-        }
-        out
-    }
-    override fun parse(doc: Document, n: Int): List<WebResult> {
-        val out = ArrayList<WebResult>()
-        for (a in doc.select("a.result-link")) {
-            if (out.size >= n) break
-            val title = a.text().trim()
-            val u = Nlp.unwrapRedirect(a.absUrl("href"))
-            if (title.isEmpty() || !u.startsWith("http")) continue
-            val tr = a.parents().firstOrNull { it.tagName() == "tr" }
-            val sn = tr?.nextElementSibling()?.selectFirst("td.result-snippet")?.text()?.trim() ?: ""
-            out.add(WebResult(title, sn, u, name))
-        }
-        return out
-    }
-}
-
-class MojeekEngine : Engine("mojeek", "Mojeek") {
-    override val reliability = 0.2
-    override fun url(q: String, page: Int) = "https://www.mojeek.com/search?q=${Nlp.enc(q)}"
-    override fun referer() = "https://www.mojeek.com/"
-    override fun parse(doc: Document, n: Int): List<WebResult> {
-        val out = ArrayList<WebResult>()
-        for (el in doc.select("ul.results-standard li, li.result")) {
-            if (out.size >= n) break
-            val a = el.selectFirst("h2 a, a.title") ?: continue
-            val title = a.text().trim()
-            val u = a.absUrl("href")
-            if (title.isEmpty() || !u.startsWith("http")) continue
-            val sn = (el.selectFirst("p.s, p")?.text() ?: "").take(200)
-            out.add(WebResult(title, sn, u, name))
-        }
-        if (out.isEmpty()) out.addAll(Engine.genericExtract(doc, name, n))
-        return out
-    }
-}
-
-class SearxEngine : Engine("searx", "SearXNG") {
-    override val reliability = 0.2
-    override fun url(q: String, page: Int) = "https://searx.be/search?q=${Nlp.enc(q)}&language=zh-CN"
-    override fun referer() = "https://searx.be/"
-    override fun parse(doc: Document, n: Int): List<WebResult> {
-        val out = ArrayList<WebResult>()
-        for (el in doc.select("article.result, div.result")) {
-            if (out.size >= n) break
-            val a = el.selectFirst("h3 a, a.url_wrapper") ?: continue
-            val title = a.text().trim()
-            val u = a.absUrl("href")
-            if (title.isEmpty() || !u.startsWith("http")) continue
-            val sn = (el.selectFirst("p.content, p")?.text() ?: "").take(200)
-            out.add(WebResult(title, sn, u, name))
-        }
-        if (out.isEmpty()) out.addAll(Engine.genericExtract(doc, name, n))
-        return out
-    }
-}
-
-class BraveEngine : Engine("brave", "Brave", experimental = true) {
-    override fun url(q: String, page: Int) = "https://search.brave.com/search?q=${Nlp.enc(q)}"
-    override fun referer() = "https://search.brave.com/"
-    override fun parse(doc: Document, n: Int): List<WebResult> {
-        val out = ArrayList<WebResult>()
-        for (el in doc.select("div.snippet, .result")) {
-            if (out.size >= n) break
-            val a = el.selectFirst("a[href^=http]") ?: continue
-            val title = (el.selectFirst(".title, .snippet-title")?.text() ?: a.text()).trim()
-            val u = a.absUrl("href")
-            if (title.length < 7 || !u.startsWith("http")) continue
-            val sn = (el.selectFirst(".snippet-description, .snippet-content, p")?.text() ?: "").take(200)
-            out.add(WebResult(title, sn, u, name))
-        }
-        if (out.isEmpty()) out.addAll(Engine.genericExtract(doc, name, n))
-        return out
-    }
-}
-
-class WikiEngine : Engine("wiki", "维基百科") {
-    override val reliability = 0.5
-    override fun url(q: String, page: Int) =
-        "https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${Nlp.enc(q)}&srlimit=8&format=json&utf8=1"
-
-    override suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
-        val html = Http.get(url(q, 1)) ?: return@withContext emptyList()
-        try {
-            val arr = JSONObject(html).getJSONObject("query").getJSONArray("search")
-            (0 until minOf(arr.length(), n)).mapNotNull { i ->
-                val o = arr.getJSONObject(i)
-                val title = o.optString("title")
-                if (title.isEmpty()) null else {
-                    val sn = org.jsoup.Jsoup.parse(o.optString("snippet")).text()
-                    val u = "https://zh.wikipedia.org/wiki/" + java.net.URLEncoder.encode(title, "UTF-8").replace("+", "_")
-                    WebResult(title, sn, u, name)
-                }
-            }
-        } catch (e: Exception) { emptyList() }
-    }
-    override fun parse(doc: Document, n: Int): List<WebResult> = emptyList()
-}
-
-/** 引擎注册表 */
+/** 引擎注册表：全部为国内直连可用，谁临时抽风就快速标失败换下一路 */
 object Engines {
     fun all(): List<Engine> = listOf(
-        BingEngine("https://www.bing.com"),
         BingEngine("https://cn.bing.com", "bingcn", "必应中国"),
+        BingEngine("https://www.bing.com", "bing", "必应"),
         BaiduEngine(),
         SogouEngine(),
         So360Engine(),
         ShenmaEngine(),
-        ToutiaoEngine(),
-        DouyinEngine(),
-        MetasoEngine(),
-        DdgEngine(),
-        MojeekEngine(),
-        SearxEngine(),
-        BraveEngine(),
-        WikiEngine()
+        ToutiaoEngine()
     )
 
     private val cache: List<Engine> by lazy { all() }

@@ -78,20 +78,21 @@ import com.wenqu.app.Prefs
 private data class QuickEngine(val name: String, val template: String)
 
 private val builtinQuick = listOf(
-    QuickEngine("百度", "https://www.baidu.com/s?wd={q}"),
+    QuickEngine("必应中国", "https://cn.bing.com/search?q={q}"),
     QuickEngine("必应", "https://www.bing.com/search?q={q}"),
+    QuickEngine("百度", "https://m.baidu.com/s?word={q}"),
     QuickEngine("搜狗", "https://www.sogou.com/web?query={q}"),
     QuickEngine("360", "https://www.so.com/s?q={q}"),
     QuickEngine("神马", "https://m.sm.cn/s?q={q}"),
-    QuickEngine("头条", "https://so.toutiao.com/search?keyword={q}"),
-    QuickEngine("抖音", "https://www.douyin.com/search/{q}"),
-    QuickEngine("秘塔AI", "https://metaso.cn/?q={q}")
+    QuickEngine("头条", "https://so.toutiao.com/search?keyword={q}")
 )
 
 /** 快速搜索：选引擎直达该搜索引擎页面（完整网页版，不受抓取限制） */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun QuickSearchScreen(onBack: () -> Unit, onOpenLink: (String) -> Unit) {
+    // 系统返回键 = 回到上一级（聊天页），不退出应用
+    BackHandler { onBack() }
     var text by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf(0) }
     var customs by remember { mutableStateOf(Prefs.customEngines()) }
@@ -167,7 +168,7 @@ fun QuickSearchScreen(onBack: () -> Unit, onOpenLink: (String) -> Unit) {
             }
             Spacer(Modifier.height(14.dp))
             Text(
-                "提示：快速搜索直接打开所选引擎的完整网页，什么都能搜；而和「小渠」聊天则由她调动 14 路引擎替你搜完、整理好答案再给你。",
+                "提示：快速搜索直接打开所选引擎的完整网页，什么都能搜；而和「小渠」聊天则由她调动多路引擎替你搜完、整理好答案再给你。",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
             )
         }
@@ -178,6 +179,8 @@ fun QuickSearchScreen(onBack: () -> Unit, onOpenLink: (String) -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
+    // 系统返回键 = 回到上一级
+    BackHandler { onBack() }
     var voice by remember { mutableStateOf(Prefs.voiceEnabled) }
     var deep by remember { mutableStateOf(Prefs.deepDefault) }
     var autoImg by remember { mutableStateOf(Prefs.autoImages) }
@@ -204,9 +207,18 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
         )
 
         SettingCard("语音与朗读") {
-            SettingRow("语音朗读回答", "开启后每条回答自动读出来（系统 TTS）") {
-                Switch(checked = voice, onCheckedChange = { voice = it; Prefs.voiceEnabled = it })
+            SettingRow("语音朗读回答", "开启后每条回答自动读出来（系统 TTS）；关闭立即静音") {
+                Switch(checked = voice, onCheckedChange = {
+                    voice = it; Prefs.voiceEnabled = it
+                    // 关闭开关立即停止正在播放的语音
+                    if (!it) ChatRepoStopVoice()
+                })
             }
+            Text(
+                "播放中的回答，点消息下方的喇叭按钮即可停止；再次点击重新播放。想要更自然的音色（类似豆包），可在系统「设置-文字转语音 TTS」安装第三方语音引擎（如讯飞），小渠会自动跟随系统引擎。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
 
         SettingCard("搜索策略") {
@@ -238,7 +250,7 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
             }
         }
 
-        SettingCard("搜索引擎（失败 3 次自动冷却 10 分钟，自动切换到其他引擎）") {
+        SettingCard("搜索引擎（国内直连可用；连续失败自动冷却，恢复后重新加入）") {
             Engines.cached().forEach { e ->
                 val on = e.id in engineIds
                 Row(
@@ -294,9 +306,19 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
         }
 
         SettingCard("关于") {
-            Text("问渠 WenQu v1.0", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("问渠 WenQu v1.1", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("作者：罗根", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
             Text(
-                "完全开源（MIT License），不含闭源组件。\n开源组件：Jetpack Compose / OkHttp / Jsoup / Coil / Kotlin Coroutines。\n搜索数据实时来自各引擎公开网页接口。",
+                "完全开源（MIT License），不含闭源组件。",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
+            )
+            Text(
+                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines。",
+                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
+            )
+            Text(
+                "搜索数据实时来自各引擎公开网页接口。",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
             )
         }
@@ -348,6 +370,10 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
 
 private fun ChatRepoClear() {
     com.wenqu.app.ChatRepo.clearAll()
+}
+
+private fun ChatRepoStopVoice() {
+    try { com.wenqu.app.ChatRepo.voice.stop() } catch (_: Exception) {}
 }
 
 @Composable

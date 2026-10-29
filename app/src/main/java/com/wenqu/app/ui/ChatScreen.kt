@@ -1,5 +1,6 @@
 package com.wenqu.app.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,10 +23,12 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -71,13 +74,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.wenqu.app.ChatRepo
+import com.wenqu.app.EngineProgress
 import com.wenqu.app.MediaResult
 import kotlinx.coroutines.launch
 
 private val sampleQuestions = listOf(
     "云南保山今天的天气怎么样",
     "现在纽约几点",
-    "量子计算是什么",
+    "郑恺是谁",
     "B站的官网是多少",
     "来几张柴犬壁纸",
     "找个关于火星探测的视频",
@@ -94,11 +98,18 @@ fun ChatScreen(
 ) {
     val msgs by ChatRepo.messages.collectAsState()
     val convs by ChatRepo.convs.collectAsState()
+    val speaking by ChatRepo.voice.speaking.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var viewImage by remember { mutableStateOf<MediaResult?>(null) }
     var about by remember { mutableStateOf(false) }
+    var engineDetail by remember { mutableStateOf<EngineProgress?>(null) }
+
+    // 抽屉打开时，系统返回键 = 关闭抽屉（而不是退出应用）
+    BackHandler(enabled = drawerState.isOpen) {
+        scope.launch { drawerState.close() }
+    }
 
     // 自动滚动：新消息到达贴底；流式增长时若用户仍贴底则继续跟随
     LaunchedEffect(msgs.size) {
@@ -123,7 +134,7 @@ fun ChatScreen(
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text("问渠", fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                            Text("为有源头活水来", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("作者罗根 · 为有源头活水来", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
@@ -205,8 +216,6 @@ fun ChatScreen(
             }
         }
     ) {
-        val lastAi = msgs.lastOrNull()?.takeIf { it.role == 1 }
-        val suggestions = lastAi?.suggestions ?: emptyList()
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
@@ -233,7 +242,7 @@ fun ChatScreen(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
                 )
             },
-            bottomBar = { InputBar(suggestions) { ChatRepo.send(it) } }
+            bottomBar = { InputBar { ChatRepo.send(it) } }
         ) { pad ->
             Box(Modifier.padding(pad).fillMaxSize()) {
                 if (msgs.isEmpty()) {
@@ -248,12 +257,14 @@ fun ChatScreen(
                         items(msgs, key = { it.id }) { m ->
                             MessageItem(
                                 m = m,
+                                speaking = speaking,
                                 onOpenLink = onOpenLink,
                                 onDelete = { ChatRepo.deleteMessage(it) },
                                 onReanswer = { ChatRepo.reanswer(it) },
-                                onSpeak = { ChatRepo.voice.speakNow(it) },
-                                onSuggestion = { ChatRepo.send(it) },
-                                onImageTap = { img, _ -> viewImage = img }
+                                onSpeakToggle = { ChatRepo.voice.toggle(it) },
+                                onSend = { ChatRepo.send(it) },
+                                onImageTap = { img, _ -> viewImage = img },
+                                onEngineTap = { p -> engineDetail = p }
                             )
                         }
                     }
@@ -265,15 +276,28 @@ fun ChatScreen(
     viewImage?.let {
         ImageDialog(img = it, onDismiss = { viewImage = null }, onOpenLink = onOpenLink)
     }
+    engineDetail?.let { p ->
+        EngineDetailDialog(p = p, onDismiss = { engineDetail = null }, onOpenLink = onOpenLink)
+    }
     if (about) {
         AlertDialog(
             onDismissRequest = { about = false },
             title = { Text("关于问渠") },
             text = {
-                Text(
-                    "问渠 WenQu v1.0\n完全开源的全网聚合 AI 搜索助手：\n\n· 14 路搜索引擎并行抓取，谁限额换谁上\n· 图片三路、视频两路全网匹配\n· 天气/时间/计算本地秒答，精准不出错\n· 上下文记忆持久保存，重启不丢\n· 语音朗读、流式输出、来源可溯源\n\n本应用 100% 开源（MIT License），不含闭源组件与追踪 SDK。\n开源组件：Jetpack Compose / OkHttp / Jsoup / Coil / Kotlin Coroutines。",
-                    fontSize = 13.sp, lineHeight = 20.sp
-                )
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(
+                        "问渠 WenQu v1.1\n作者：罗根\n\n" +
+                                "完全开源的全网聚合搜索问答助手：\n\n" +
+                                "· 必应/必应中国/百度/搜狗/360/神马/头条 多路引擎并行抓取，谁抽风换谁上\n" +
+                                "· 图片四路、视频两路全网匹配\n" +
+                                "· 天气/时间/计算本地秒答，精准不出错\n" +
+                                "· 上下文记忆持久保存，重启不丢\n" +
+                                "· 语音朗读、流式输出、来源可溯源\n\n" +
+                                "本应用 100% 开源（MIT License），不含闭源组件与追踪 SDK。\n" +
+                                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines，均遵循其各自开源协议。",
+                        fontSize = 13.sp, lineHeight = 20.sp
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = { about = false }) { Text("关闭") }
@@ -288,7 +312,8 @@ private fun EmptyState(onPick: (String) -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
@@ -297,7 +322,7 @@ private fun EmptyState(onPick: (String) -> Unit) {
         Text("你好，我是小渠", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "十四路搜索引擎 + 实时联网\n把全网的答案整理成一句人话给你",
+            "多路搜索引擎 + 实时联网\n把全网的答案整理成一句人话给你\n问时间、问天气，秒答不用搜",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             lineHeight = 20.sp
@@ -326,9 +351,8 @@ private fun EmptyState(onPick: (String) -> Unit) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InputBar(suggestions: List<String>, onSend: (String) -> Unit) {
+private fun InputBar(onSend: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     fun submit() {
         val t = text.trim()
@@ -338,29 +362,6 @@ private fun InputBar(suggestions: List<String>, onSend: (String) -> Unit) {
     }
     Surface(tonalElevation = 3.dp, color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.navigationBarsPadding().imePadding()) {
-            if (suggestions.isNotEmpty()) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
-                ) {
-                    suggestions.forEach { s ->
-                        Surface(
-                            shape = RoundedCornerShape(50),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-                            )
-                        ) {
-                            Text(
-                                s, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .clickable { onSend(s) }
-                                    .padding(horizontal = 11.dp, vertical = 5.dp)
-                            )
-                        }
-                    }
-                }
-            }
             Row(
                 Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.Bottom

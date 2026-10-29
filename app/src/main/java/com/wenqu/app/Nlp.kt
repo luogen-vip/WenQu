@@ -95,8 +95,74 @@ object Nlp {
             if (u.contains("duckduckgo.com/l/")) {
                 val query = URI(u).rawQuery ?: ""
                 Regex("uddg=([^&]+)").find(query)?.let { URLDecoder.decode(it.groupValues[1], "UTF-8") } ?: u
+            } else if (u.contains("bing.com/ck/")) {
+                // 必应跳转链 u=a1<base64url>，还原真实网址
+                Regex("[?&]u=a1([A-Za-z0-9_-]+)").find(u)?.let { m ->
+                    val b64 = m.groupValues[1]
+                    val pad = "=".repeat((4 - b64.length % 4) % 4)
+                    val dec = String(java.util.Base64.getUrlDecoder().decode(b64 + pad))
+                    if (dec.startsWith("http")) dec else u
+                } ?: u
             } else u
         } catch (e: Exception) { u }
+    }
+
+    /**
+     * 从"给我找找郑恺相关的图片"这类指令里提取真正的主体「郑恺」。
+     * 提取为空时调用方回退到上一轮话题（lastQuery），保证上下文衔接。
+     */
+    fun extractTopic(q: String): String {
+        var s = q
+        s = s.replace(Regex("\\d+\\s*张|[一二两三四五六七八九十]+\\s*张|几张|多张"), "")
+        val stops = listOf(
+            "帮我", "帮忙", "麻烦", "我想看看", "我想看", "想看看", "想看", "我想找找", "我想找", "我想",
+            "给我找找", "给我找", "帮我找找", "帮我找", "给我搜", "给我", "找找", "找一找", "找些", "找点",
+            "搜一下", "搜搜", "搜个", "搜下", "查一下", "查查", "查个", "查下",
+            "看看", "看一下", "来点", "来几张", "来个", "来几张", "发我", "发几张",
+            "全网", "相关的", "有关联的", "有关联", "关联的", "相关", "有关的", "有关", "关联",
+            "一些", "一点点", "一点", "点点",
+            "的图片", "的图", "的相片", "的照片", "图片", "相片", "照片", "图",
+            "壁纸", "头像", "海报", "美图", "插图", "表情包", "资料",
+            "的视频", "视频", "影片", "预告片", "纪录片", "解说",
+            "几个", "一下", "什么"
+        )
+        var changed = true
+        while (changed) {
+            changed = false
+            for (w in stops) {
+                val idx = s.indexOf(w)
+                if (idx >= 0) {
+                    s = s.removeRange(idx, idx + w.length)
+                    changed = true
+                }
+            }
+        }
+        return s.trim().trim('的', '了', '，', ',', '。', '？', '?', '！', '!', '、', ' ').trim()
+    }
+
+    /** 解析“5张/五张/几张”中的数量，返回 0 表示未指定 */
+    fun mediaCount(q: String): Int {
+        Regex("(\\d+)\\s*张").find(q)?.let { return (it.groupValues[1].toIntOrNull() ?: 0).coerceIn(1, 12) }
+        Regex("([一二两三四五六七八九十]+)\\s*张").find(q)?.let { return chineseNum(it.groupValues[1]).coerceIn(1, 12) }
+        return 0
+    }
+
+    fun chineseNum(s: String): Int {
+        val digits = mapOf(
+            '零' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,
+            '五' to 5, '六' to 6, '七' to 7, '八' to 8, '九' to 9
+        )
+        return when {
+            s.isEmpty() -> 0
+            s == "十" -> 10
+            s.startsWith("十") -> 10 + (digits[s.last()] ?: 0)
+            s.contains("十") -> {
+                val parts = s.split("十")
+                (digits[parts[0].firstOrNull()] ?: 1) * 10 +
+                        (if (parts.size > 1 && parts[1].isNotEmpty()) digits[parts[1].first()] ?: 0 else 0)
+            }
+            else -> digits[s.firstOrNull()] ?: 0
+        }
     }
 
     fun shorten(t: String, n: Int): String {

@@ -41,7 +41,7 @@ class Aggregator(private val onUpdate: (EngineProgress) -> Unit) {
                         } else {
                             Prefs.recordOk(e.id)
                             collected.addAll(rs)
-                            EngineProgress(e.id, e.name, 1, rs.size)
+                            EngineProgress(e.id, e.name, 1, rs.size, rs.take(8))
                         }
                         states[e.id] = p1; onUpdate(p1)
                     }

@@ -17,7 +17,7 @@ import kotlin.random.Random
 
 /**
  * 问答总调度：
- * 意图路由 -> 闲聊/时间/天气/计算/游戏（本地秒答） / 图片 / 视频 / 链接 / 全网搜索
+ * 意图路由 -> 时间/天气/闲聊/计算/游戏（本地秒答） / 图片 / 视频 / 链接 / 全网搜索
  * -> 多引擎并行 -> 抽取合成 -> 打字机流式输出 -> 落库持久化（上下文记忆永不丢）
  */
 object ChatRepo {
@@ -39,13 +39,18 @@ object ChatRepo {
     lateinit var voice: Voice
         private set
 
-    // 媒体上下文（用于"换一批/不喜欢重新找"）
+    // 媒体上下文（"换一批/重新生成"带同一主题；池化翻页避免重复与超页失败）
     private var imageQ = ""
-    private var imageOffset = 0
+    private var imageTurn = 0
     private var imageCtx = false
+    private var imagePool = emptyList<MediaResult>()
+    private val imageSeen = LinkedHashSet<String>()
+
     private var videoQ = ""
-    private var videoOffset = 0
+    private var videoTurn = 0
     private var videoCtx = false
+    private var videoPool = emptyList<MediaResult>()
+    private val videoSeen = LinkedHashSet<String>()
 
     fun init(ctx: Context) {
         AppCtx.init(ctx)
@@ -63,6 +68,7 @@ object ChatRepo {
     fun newConversation() {
         currentConvId = Db.createConv("新对话")
         currentConvTitle = "新对话"
+        imageCtx = false; videoCtx = false
         _messages.value = emptyList()
         refreshConvs()
     }
@@ -71,6 +77,7 @@ object ChatRepo {
         currentConvId = id
         _messages.value = Db.messages(id)
         currentConvTitle = Db.conv(id)?.title ?: "对话"
+        imageCtx = false; videoCtx = false
     }
 
     fun openLatestOrCreate() {
@@ -102,9 +109,11 @@ object ChatRepo {
         if (text.isEmpty()) return
         val conv = Db.conv(currentConvId) ?: return
 
+        // 关键：取旧的 lastQuery 给本轮路由当上文，本轮输入不覆盖它（各流程完成时才写入真实 query）
+        val prevQuery = conv.lastQuery
         val uid = Db.insertMessage(currentConvId, 0, text, "{}")
         val title = if (conv.title.isEmpty() || conv.title == "新对话") Nlp.shorten(text, 14) else conv.title
-        Db.touchConv(currentConvId, lastQuery = text, title = title)
+        Db.touchConv(currentConvId, title = title)
         currentConvTitle = title
         refreshConvs()
 
@@ -113,7 +122,7 @@ object ChatRepo {
             UiMessage(uid, 0, text),
             UiMessage(tempId, 1, "", searching = true)
         )
-        scope.launch { mutex.withLock { runPipeline(tempId, text) } }
+        scope.launch { mutex.withLock { runPipeline(tempId, text, prevQuery) } }
     }
 
     fun reanswer(msgId: Long) {
@@ -122,6 +131,7 @@ object ChatRepo {
         if (idx < 0) return
         val userText = Db.lastUserTextBefore(currentConvId, msgId)
         if (userText.isEmpty()) return
+        val prevQuery = Db.conv(currentConvId)?.lastQuery ?: userText
         _messages.value = list.toMutableList().apply {
             this[idx] = this[idx].copy(
                 text = "", streaming = false, searching = true,
@@ -129,23 +139,35 @@ object ChatRepo {
                 images = emptyList(), videos = emptyList(), suggestions = emptyList()
             )
         }
-        scope.launch { mutex.withLock { runPipeline(msgId, userText) } }
+        scope.launch { mutex.withLock { runPipeline(msgId, userText, prevQuery) } }
     }
 
     // ---------------- 管线 ----------------
 
-    private suspend fun runPipeline(msgId: Long, userText: String) {
+    private suspend fun runPipeline(msgId: Long, userText: String, lastQuery: String) {
         try {
             val conv = Db.conv(currentConvId)
             if (conv == null) {
                 finishText(msgId, "会话好像丢了，请新建一个对话。")
                 return
             }
-            val route = IntentRouter.route(userText, conv, imageCtx, videoCtx, conv.lastQuery)
+            val route = IntentRouter.route(userText, conv, imageCtx, videoCtx, lastQuery)
             when (route) {
                 is Intent.SmallTalk -> {
                     val reply = SmallTalk.lastReply
                     if (reply == "__GAME_START__") startGuessGame(msgId) else finishText(msgId, reply)
+                }
+                is Intent.Time -> {
+                    // 本地秒答优先；地点未知等无法本地回答时回落搜索
+                    val t = TimeAnswer.tryAnswer(route.q)
+                    if (t != null) finishText(msgId, t)
+                    else webFlow(msgId, Intent.Web(Nlp.stripPolite(route.q).ifEmpty { route.q }))
+                }
+                is Intent.WeatherQ -> {
+                    // 开源气象接口秒答；失败才回落搜索
+                    val w = runCatching { Weather.tryAnswer(route.q) }.getOrNull()
+                    if (w != null) finishText(msgId, w)
+                    else webFlow(msgId, Intent.Web(route.q))
                 }
                 is String -> if (route.startsWith("GUESS:")) guessStep(msgId, route.removePrefix("GUESS:").toIntOrNull() ?: 50, conv)
                 is Intent.GameQuit -> {
@@ -163,8 +185,8 @@ object ChatRepo {
                     )
                 }
                 is Intent.Math -> finishText(msgId, MathEval.answerText(route.expr, route.result))
-                is Intent.Image -> imageFlow(msgId, route.q, route.more)
-                is Intent.Video -> videoFlow(msgId, route.q, route.more)
+                is Intent.Image -> imageFlow(msgId, route.q, route.more, route.count)
+                is Intent.Video -> videoFlow(msgId, route.q, route.more, route.count)
                 is Intent.Url -> urlFlow(msgId, route.brand)
                 is Intent.Web -> webFlow(msgId, route)
             }
@@ -177,26 +199,26 @@ object ChatRepo {
 
     private suspend fun webFlow(msgId: Long, intent: Intent.Web) {
         val q = intent.q
-
-        // 专项秒答优先（天气/时间），这些用搜索反而会不准
-        if (!intent.reanswer) {
-            TimeAnswer.tryAnswer(q)?.let { finishText(msgId, it); return }
-            Weather.tryAnswer(q)?.let { finishText(msgId, it); return }
-        }
-
         val engines = Prefs.enabledEngineIds().mapNotNull { Engines.byId(it) }.ifEmpty { Engines.cached() }
         val per = if (intent.deep) 18 else 10
 
-        update(msgId) { it.copy(text = "正在唤醒 ${engines.size} 路搜索引擎……") }
+        // 立即点亮所有引擎芯片（转圈），用户零等待感知
+        update(msgId) {
+            it.copy(
+                text = "正在并行检索 ${engines.size} 路引擎，点引擎名可看它搜到了什么：",
+                engineStates = engines.map { e -> EngineProgress(e.id, e.name, 0, 0) }
+            )
+        }
         val agg = Aggregator { p ->
-            update(msgId) { m -> m.copy(engineStates = mergeStates(m.engineStates, p), text = if (m.text.startsWith("正在唤醒")) "" else m.text) }
+            update(msgId) { m -> m.copy(engineStates = mergeStates(m.engineStates, p), text = "") }
         }
         val (ranked, states) = agg.searchWeb(q, engines, per, intent.deep)
 
         if (ranked.isEmpty()) {
             finishText(
                 msgId, Synth.failText(states.count { it.state == 1 }),
-                suggestions = listOf("再试一次", "换个说法再问")
+                suggestions = listOf("再试一次", "换个说法再问"),
+                query = q
             )
             return
         }
@@ -211,60 +233,88 @@ object ChatRepo {
         // 主动附视频：操作/教程类问题
         var vids = emptyList<MediaResult>()
         if (q.length <= 25 && Regex("(怎么做|如何|教程|安装|步骤|评测|开箱|操作)").containsMatchIn(q)) {
-            vids = runCatching { VideoSearcher.search(q, 0, 4) }.getOrDefault(emptyList())
+            vids = runCatching { VideoSearcher.search(q, 1, 4) }.getOrDefault(emptyList())
         }
 
         val out = Synth.compose(q, ranked, states, intent.deep, intent.reanswer)
 
         imageCtx = false; videoCtx = false
-        if (imgs.isNotEmpty()) { imageCtx = true; imageQ = q; imageOffset = 0 }
-        if (vids.isNotEmpty()) { videoCtx = true; videoQ = q; videoOffset = 0 }
+        if (imgs.isNotEmpty()) {
+            imageCtx = true; imageQ = q; imageTurn = 0
+            imagePool = emptyList(); imageSeen.clear()
+            imgs.forEach { imageSeen.add(it.image) }
+        }
+        if (vids.isNotEmpty()) {
+            videoCtx = true; videoQ = q; videoTurn = 0
+            videoPool = emptyList(); videoSeen.clear()
+            vids.forEach { videoSeen.add(it.page) }
+        }
 
-        finishText(msgId, out.text, out.sources, out.suggestions, imgs, vids)
+        finishText(msgId, out.text, out.sources, out.suggestions, imgs, vids, q)
         Db.touchConv(currentConvId, lastQuery = q)
     }
 
     // ---------------- 图片 ----------------
 
-    private suspend fun imageFlow(msgId: Long, q: String, more: Boolean) {
-        val query = (if (more) imageQ.ifEmpty { q } else q).ifEmpty { "风景壁纸" }
-        val offset = if (more) imageOffset + 24 else 0
-        imageQ = query
-        imageOffset = offset
+    /** 从池里取未展示过的 n 张（换一批不重复、不超页打叉） */
+    private fun freshImages(n: Int): List<MediaResult> {
+        val out = ArrayList<MediaResult>()
+        val remain = ArrayList<MediaResult>()
+        for (m in imagePool) {
+            if (out.size < n && m.image.isNotEmpty() && imageSeen.add(m.image)) out.add(m)
+            else remain.add(m)
+        }
+        imagePool = remain
+        return out
+    }
+
+    private suspend fun imageFlow(msgId: Long, q: String, more: Boolean, count: Int) {
+        val query = (if (more && imageQ.isNotEmpty()) imageQ else q).ifEmpty { "风景壁纸" }
+        val want = if (count in 1..12) count else 6
+        if (!more || query != imageQ) {
+            imageQ = query; imageTurn = 0
+            imageSeen.clear(); imagePool = emptyList()
+        }
         imageCtx = true
         videoCtx = false
 
-        val states = mutableListOf(
-            EngineProgress("bingimg", "必应图片", 0, 0),
-            EngineProgress("baiduimg", "百度图片", 0, 0),
-            EngineProgress("ddgimg", "DDG图片", 0, 0)
-        )
-        update(msgId) { it.copy(engineStates = states.toList(), text = "") }
+        var shown = freshImages(want)
 
-        coroutineScope {
-            val j1 = async {
-                val r = runCatching { ImageSearcher.fromBing(query, offset, 12) }.getOrDefault(emptyList())
-                setImgState(msgId, states, "bingimg", r.size); r
+        var round = 0
+        while (shown.size < want && round < 3) {
+            round++
+            val offset = imageTurn * 30
+            imageTurn++
+
+            val states = mutableListOf(
+                EngineProgress("bingimg", "必应图片", 0, 0),
+                EngineProgress("baiduimg", "百度图片", 0, 0),
+                EngineProgress("sogouimg", "搜狗图片", 0, 0),
+                EngineProgress("soimg", "360图片", 0, 0)
+            )
+            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$query」的图片…") }
+
+            coroutineScope {
+                val j1 = async { runCatching { ImageSearcher.fromBing(query, offset, 30) }.getOrDefault(emptyList()) }
+                val j2 = async { runCatching { ImageSearcher.fromBaidu(query, offset, 30) }.getOrDefault(emptyList()) }
+                val j3 = async { runCatching { ImageSearcher.fromSogou(query, offset, 30) }.getOrDefault(emptyList()) }
+                val j4 = async { runCatching { ImageSearcher.fromSo360(query, offset, 30) }.getOrDefault(emptyList()) }
+                val l1 = j1.await(); val l2 = j2.await(); val l3 = j3.await(); val l4 = j4.await()
+                setImgState(msgId, states, "bingimg", l1.size)
+                setImgState(msgId, states, "baiduimg", l2.size)
+                setImgState(msgId, states, "sogouimg", l3.size)
+                setImgState(msgId, states, "soimg", l4.size)
+                imagePool = imagePool + l1 + l2 + l3 + l4
             }
-            val j2 = async {
-                val r = runCatching { ImageSearcher.fromBaidu(query, offset, 12) }.getOrDefault(emptyList())
-                setImgState(msgId, states, "baiduimg", r.size); r
-            }
-            val j3 = async {
-                val r = runCatching { ImageSearcher.fromDdg(query, offset, 12) }.getOrDefault(emptyList())
-                setImgState(msgId, states, "ddgimg", r.size); r
-            }
-            val all = (j1.await() + j2.await() + j3.await())
-            val seen = HashSet<String>()
-            val merged = all.filter { seen.add(it.image) }.take(12)
-            if (merged.isEmpty()) {
-                finishText(msgId, Synth.imageFail(query), suggestions = listOf("再试一次", "换个关键词找图"))
-            } else {
-                val sugg = if (more) listOf("还是不喜欢，再换", "找相关的视频", "查查文字资料")
-                else listOf("换一批", "找相关的视频", "查查文字资料")
-                finishText(msgId, Synth.imageIntro(query, merged.size), suggestions = sugg, images = merged)
-                Db.touchConv(currentConvId, lastQuery = query)
-            }
+            shown = shown + freshImages(want - shown.size)
+        }
+
+        val show = shown.take(want)
+        if (show.isEmpty()) {
+            finishText(msgId, Synth.imageFail(query), suggestions = listOf("再试一次", "换个关键词找图"), query = query)
+        } else {
+            finishText(msgId, Synth.imageIntro(query, show.size, want), images = show, query = query)
+            Db.touchConv(currentConvId, lastQuery = query)
         }
     }
 
@@ -281,42 +331,58 @@ object ChatRepo {
 
     // ---------------- 视频 ----------------
 
-    private suspend fun videoFlow(msgId: Long, q: String, more: Boolean) {
-        val query = (if (more) videoQ.ifEmpty { q } else q).ifEmpty { "热门视频" }
-        val offset = if (more) videoOffset + 10 else 0
-        videoQ = query
-        videoOffset = offset
+    private fun freshVideos(n: Int): List<MediaResult> {
+        val out = ArrayList<MediaResult>()
+        val remain = ArrayList<MediaResult>()
+        for (m in videoPool) {
+            if (out.size < n && m.page.isNotEmpty() && videoSeen.add(m.page)) out.add(m)
+            else remain.add(m)
+        }
+        videoPool = remain
+        return out
+    }
+
+    private suspend fun videoFlow(msgId: Long, q: String, more: Boolean, count: Int) {
+        val query = (if (more && videoQ.isNotEmpty()) videoQ else q).ifEmpty { "热门视频" }
+        val want = if (count in 1..12) count else 6
+        if (!more || query != videoQ) {
+            videoQ = query; videoTurn = 0
+            videoSeen.clear(); videoPool = emptyList()
+        }
         videoCtx = true
         imageCtx = false
 
-        val states = mutableListOf(
-            EngineProgress("bili", "哔哩哔哩", 0, 0),
-            EngineProgress("bingvid", "必应视频", 0, 0)
-        )
-        update(msgId) { it.copy(engineStates = states.toList(), text = "") }
+        var shown = freshVideos(want)
 
-        coroutineScope {
-            val j1 = async {
-                val r = runCatching { VideoSearcher.fromBilibili(query, offset / 10 + 1, 8) }.getOrDefault(emptyList())
-                val i = states.indexOfFirst { it.id == "bili" }
-                if (i >= 0) { states[i] = states[i].copy(state = if (r.isEmpty()) 2 else 1, count = r.size); update(msgId) { it.copy(engineStates = states.toList()) } }
-                r
+        var round = 0
+        while (shown.size < want && round < 3) {
+            round++
+            val page = videoTurn + 1
+            videoTurn++
+
+            val states = mutableListOf(
+                EngineProgress("bili", "哔哩哔哩", 0, 0),
+                EngineProgress("bingvid", "必应视频", 0, 0)
+            )
+            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$query」的视频…") }
+
+            coroutineScope {
+                val j1 = async { runCatching { VideoSearcher.fromBilibili(query, page, 10) }.getOrDefault(emptyList()) }
+                val j2 = async { runCatching { VideoSearcher.fromBing(query, 12) }.getOrDefault(emptyList()) }
+                val l1 = j1.await(); val l2 = j2.await()
+                setImgState(msgId, states, "bili", l1.size)
+                setImgState(msgId, states, "bingvid", l2.size)
+                videoPool = videoPool + l1 + l2
             }
-            val j2 = async {
-                val r = runCatching { VideoSearcher.fromBing(query, 8) }.getOrDefault(emptyList())
-                val i = states.indexOfFirst { it.id == "bingvid" }
-                if (i >= 0) { states[i] = states[i].copy(state = if (r.isEmpty()) 2 else 1, count = r.size); update(msgId) { it.copy(engineStates = states.toList()) } }
-                r
-            }
-            val all = j1.await() + j2.await()
-            val seen = HashSet<String>()
-            val merged = all.filter { seen.add(it.page) }.take(10)
-            if (merged.isEmpty()) {
-                finishText(msgId, Synth.videoFail(query), suggestions = listOf("再试一次", "换个关键词找视频"))
-            } else {
-                finishText(msgId, Synth.videoIntro(query, merged.size), suggestions = listOf("再来一批", "找相关图片", "查查文字资料"), videos = merged)
-                Db.touchConv(currentConvId, lastQuery = query)
-            }
+            shown = shown + freshVideos(want - shown.size)
+        }
+
+        val show = shown.take(want)
+        if (show.isEmpty()) {
+            finishText(msgId, Synth.videoFail(query), suggestions = listOf("再试一次", "换个关键词找视频"), query = query)
+        } else {
+            finishText(msgId, Synth.videoIntro(query, show.size), videos = show, query = query)
+            Db.touchConv(currentConvId, lastQuery = query)
         }
     }
 
@@ -325,17 +391,22 @@ object ChatRepo {
     private suspend fun urlFlow(msgId: Long, brand: String) {
         val q = brand.ifEmpty { "官方网站" }
         val engines = Prefs.enabledEngineIds().mapNotNull { Engines.byId(it) }.ifEmpty { Engines.cached() }
-        update(msgId) { it.copy(text = "正在全网核实「$q」的官方网址……") }
+        update(msgId) {
+            it.copy(
+                text = "正在全网核实「$q」的官方网址……",
+                engineStates = engines.map { e -> EngineProgress(e.id, e.name, 0, 0) }
+            )
+        }
         val agg = Aggregator { p ->
             update(msgId) { m -> m.copy(engineStates = mergeStates(m.engineStates, p), text = "") }
         }
         val (ranked, _) = agg.searchWeb("$q 官网", engines, 12, false)
         if (ranked.isEmpty()) {
-            finishText(msgId, Synth.failText(0), suggestions = listOf("再试一次"))
+            finishText(msgId, Synth.failText(0), suggestions = listOf("再试一次"), query = q)
             return
         }
         val out = Synth.urlAnswer(q, ranked)
-        finishText(msgId, out.text, out.sources, out.suggestions)
+        finishText(msgId, out.text, out.sources, out.suggestions, query = q)
         Db.touchConv(currentConvId, lastQuery = q)
     }
 
@@ -383,7 +454,8 @@ object ChatRepo {
         sources: List<SourceRef> = emptyList(),
         suggestions: List<String> = emptyList(),
         images: List<MediaResult> = emptyList(),
-        videos: List<MediaResult> = emptyList()
+        videos: List<MediaResult> = emptyList(),
+        query: String = ""
     ) {
         update(msgId) { it.copy(text = "", searching = false, streaming = true, sources = sources) }
         var i = 0
@@ -392,9 +464,13 @@ object ChatRepo {
             update(msgId) { it.copy(text = text.substring(0, i)) }
             delay(15)
         }
-        update(msgId) { it.copy(text = text, streaming = false, images = images, videos = videos, suggestions = suggestions) }
+        update(msgId) {
+            it.copy(text = text, streaming = false, images = images, videos = videos, suggestions = suggestions, query = query)
+        }
 
-        val meta = Db.metaOf(UiMessage(0, 1, text, suggestions = suggestions, sources = sources, images = images, videos = videos))
+        val meta = Db.metaOf(
+            UiMessage(0, 1, text, suggestions = suggestions, sources = sources, images = images, videos = videos, query = query)
+        )
         if (msgId < 0) {
             val real = Db.insertMessage(currentConvId, 1, text, meta)
             update(msgId) { it.copy(id = real) }

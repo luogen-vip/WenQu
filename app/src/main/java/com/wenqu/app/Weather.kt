@@ -26,6 +26,15 @@ object Weather {
     private fun codeDesc(c: Int): String = CODES[c] ?: "天气多变"
     private fun windDir(d: Double): String = DIRS[((d % 360 + 360) % 360 / 45 + 0.5).toInt() % 8]
 
+    /** 意图路由用：是否天气类问题（非 suspend，只做判定） */
+    fun looksLike(raw: String): Boolean {
+        val q = raw.trim()
+        if (q.length > 30) return false
+        if (!Regex("(天气|气温|温度|下雨|降雨|下雪|冷不冷|热不热|多少度|几度|穿什么)").containsMatchIn(q)) return false
+        if (Regex("(什么是天气|天气系统|天气预报怎么|气象学|天气API|天气是如何|天气的形成)").containsMatchIn(q)) return false
+        return true
+    }
+
     suspend fun tryAnswer(raw: String): String? = withContext(Dispatchers.IO) {
         val q = raw.trim()
         if (!Regex("(天气|气温|温度|下雨|降雨|下雪|冷不冷|热不热|多少度|几度)").containsMatchIn(q)) return@withContext null
@@ -40,16 +49,17 @@ object Weather {
         place = place.trim().trimEnd('。', '.', '？', '?', '，', ',')
         if (place.isEmpty() || place.length > 14) return@withContext null
 
+        // 地理编码改用 Open-Meteo 自带服务（与气象接口同域，国内可达性一致）
         val geo = Http.get(
-            "https://nominatim.openstreetmap.org/search?q=${Nlp.enc(place)}&format=json&limit=1&accept-language=zh",
-            ua = "WenQuApp/1.0 (open-source android app)"
+            "https://geocoding-api.open-meteo.com/v1/search?name=${Nlp.enc(place)}&count=1&language=zh&format=json"
         ) ?: return@withContext null
         val arr = try { JSONArray(geo) } catch (e: Exception) { return@withContext null }
         if (arr.length() == 0) return@withContext null
         val g = arr.getJSONObject(0)
-        val lat = g.optString("lat")
-        val lon = g.optString("lon")
-        val display = g.optString("display_name").split(",").take(3).joinToString("")
+        val lat = g.optString("latitude")
+        val lon = g.optString("longitude")
+        val admin1 = g.optString("admin1")
+        val display = g.optString("name") + if (admin1.isEmpty() || admin1 == g.optString("name")) "" else "（$admin1）"
 
         val w = Http.get(
             "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +
@@ -98,7 +108,7 @@ object Weather {
                     sb.append("\n")
                 }
             }
-            sb.append("\n数据来自 Open-Meteo（开源气象）+ OpenStreetMap，实时准确。要不要我顺便找找当地的实时资讯？")
+            sb.append("\n数据来自 Open-Meteo（开源气象接口），实时准确。要不要我顺便找找当地的实时资讯？")
             sb.toString()
         } catch (e: Exception) {
             null
