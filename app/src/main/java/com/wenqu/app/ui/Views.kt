@@ -3,6 +3,11 @@
 package com.wenqu.app.ui
 
 import android.widget.Toast
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -297,12 +302,12 @@ private fun AiBubble(
 
 @Composable
 fun BlinkCursor() {
-    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "cursor")
+    val transition = rememberInfiniteTransition(label = "cursor")
     val alpha by transition.animateFloat(
         initialValue = 0.15f, targetValue = 0.9f,
-        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-            androidx.compose.animation.core.tween(500),
-            androidx.compose.animation.core.RepeatMode.Reverse
+        animationSpec = infiniteRepeatable(
+            tween(500),
+            RepeatMode.Reverse
         ), label = "cursorAlpha"
     )
     Text("▍", color = MaterialTheme.colorScheme.primary.copy(alpha = alpha), fontSize = 15.sp)

@@ -346,7 +346,6 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
     }
 }
 
-@Composable
 private fun ChatRepoClear() {
     com.wenqu.app.ChatRepo.clearAll()
 }
