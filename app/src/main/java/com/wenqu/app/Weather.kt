@@ -329,4 +329,116 @@ object Weather {
             null
         }
     }
+
+    // ================= v1.9：结构化天气事实（交给本地模型组织语言，旧文案只作兜底） =================
+
+    /** 天气事实：只含数据，不含任何固定话术 */
+    data class Fact(
+        val place: String,
+        val desc: String,
+        val temp: String,
+        val feels: String,
+        val humidity: String,
+        val wind: String,
+        val days: List<String>,
+        val source: String
+    )
+
+    fun factToMaterial(f: Fact): String = buildString {
+        append("【天气事实（来自 ${f.source} 实时气象接口）】\n")
+        append("地点：${f.place}\n")
+        append("当前天气：${f.desc}，气温 ${f.temp}°C，体感 ${f.feels}°C\n")
+        append("风况：${f.wind}；湿度：${f.humidity}%\n")
+        f.days.forEachIndexed { i, d -> append("$d\n") }
+    }
+
+    /** 双源级联拉取结构化事实：Open-Meteo → wttr.in；全挂返回 null（上层走搜索兜底） */
+    suspend fun fetchFact(place: String): Fact? = withContext(Dispatchers.IO) {
+        val geo = geocode(place)
+        val oma = geo?.let { runCatching { omaFact(it) }.getOrNull() }
+        oma ?: runCatching { wttrFact(place) }.getOrNull()
+    }
+
+    private suspend fun omaFact(geo: Geo): Fact? = withContext(Dispatchers.IO) {
+        val w = Http.get(
+            "https://api.open-meteo.com/v1/forecast?latitude=${geo.lat}&longitude=${geo.lon}" +
+                    "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m" +
+                    "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+                    "&timezone=auto&forecast_days=3",
+            callTimeoutSec = 12
+        ) ?: return@withContext null
+        try {
+            val o = JSONObject(w)
+            val cur = o.getJSONObject("current")
+            val daily = o.getJSONObject("daily")
+            val days = ArrayList<String>()
+            val dates = daily.optJSONArray("time")
+            val maxs = daily.optJSONArray("temperature_2m_max")
+            val mins = daily.optJSONArray("temperature_2m_min")
+            val codes = daily.optJSONArray("weather_code")
+            val probs = daily.optJSONArray("precipitation_probability_max")
+            if (dates != null && maxs != null && mins != null) {
+                val labels = listOf("今天", "明天", "后天")
+                for (i in 0 until minOf(3, dates.length())) {
+                    var line = "${labels.getOrNull(i) ?: ""}：${String.format("%.0f", mins.getDouble(i))}~" +
+                            "${String.format("%.0f", maxs.getDouble(i))}°C"
+                    if (codes != null) line += "，${codeDesc(codes.getInt(i))}"
+                    if (probs != null) line += "，降水概率 ${probs.optInt(i)}%"
+                    days.add(line)
+                }
+            }
+            Fact(
+                place = geo.display,
+                desc = codeDesc(cur.getInt("weather_code")),
+                temp = String.format("%.1f", cur.getDouble("temperature_2m")),
+                feels = String.format("%.1f", cur.getDouble("apparent_temperature")),
+                humidity = String.format("%.0f", cur.getDouble("relative_humidity_2m")),
+                wind = "${windDir(cur.getDouble("wind_direction_10m"))} ${String.format("%.0f", cur.getDouble("wind_speed_10m"))} km/h",
+                days = days,
+                source = "Open-Meteo"
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun wttrFact(place: String): Fact? = withContext(Dispatchers.IO) {
+        val js = Http.get("https://wttr.in/${Nlp.enc(place)}?format=j1", callTimeoutSec = 10)
+            ?: return@withContext null
+        try {
+            val o = JSONObject(js)
+            val cur = o.getJSONArray("current_condition").getJSONObject(0)
+            val t = cur.optString("temp_C").toDoubleOrNull() ?: return@withContext null
+            val days = ArrayList<String>()
+            val arr = o.optJSONArray("weather")
+            if (arr != null) {
+                val labels = listOf("今天", "明天", "后天")
+                for (i in 0 until minOf(3, arr.length())) {
+                    val d = arr.getJSONObject(i)
+                    val dcode = d.optJSONArray("hourly")?.let { h ->
+                        var best = 113
+                        for (j in 0 until h.length()) {
+                            if (h.getJSONObject(j).optString("time") == "1200") {
+                                best = h.getJSONObject(j).optInt("weatherCode", 113); break
+                            }
+                        }
+                        best
+                    } ?: 113
+                    days.add("${labels.getOrNull(i) ?: ""}：${d.optString("mintempC")}~${d.optString("maxtempC")}°C，${WWO[dcode] ?: "天气多变"}")
+                }
+            }
+            Fact(
+                place = place,
+                desc = WWO[cur.optInt("weatherCode", 0)] ?: "天气多变",
+                temp = String.format("%.1f", t),
+                feels = String.format("%.1f", cur.optString("FeelsLikeC").toDoubleOrNull() ?: t),
+                humidity = String.format("%.0f", cur.optString("humidity").toDoubleOrNull() ?: 0.0),
+                wind = "${DIR16[cur.optString("winddir16Point")] ?: ""} ${String.format("%.0f", cur.optString("windspeedKmph").toDoubleOrNull() ?: 0.0)} km/h",
+                days = days,
+                source = "wttr.in"
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

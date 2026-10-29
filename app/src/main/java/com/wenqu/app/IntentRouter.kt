@@ -12,6 +12,8 @@ sealed class Intent {
     data class Math(val expr: String, val result: String) : Intent()
     object Recall : Intent()
     object GameQuit : Intent()
+    /** v1.9：模糊地带 —— 闲聊/情感/常识/主观求助……到底是直接答还是联网搜，交给本地模型自己判断，不再写死 */
+    data class Ambiguous(val q: String) : Intent()
 }
 
 object IntentRouter {
@@ -128,9 +130,17 @@ object IntentRouter {
             return Intent.Url(sq.ifEmpty { q })
         }
 
-        // 12) 常规搜索（清洗口语）
+        // 12) 明确的强搜索信号 → 直接搜索，零决策延迟（用户要快）
+        val strongSearch = Regex(
+            "(查一下|查查|帮我查|搜一下|搜搜|搜索|新闻|资讯|最新|最近发生|热点|目前|现状|价格|多少钱|多少钱|比分|结果|排行榜|榜单|资料|简介|百科|是什么|是什么意思|什么叫|是什么来头|是谁|为什么|为啥|什么原因|怎么回事|怎么做|如何|教程|攻略|来历|历史|出生|去世|哪一年|哪部|哪家|哪个更|地址在哪|在哪里)"
+        ).containsMatchIn(ql)
         val clean = Nlp.stripPolite(q).ifEmpty { q }
-        val deep = Regex("(深入|详细|全面|仔细)").containsMatchIn(ql) || Prefs.deepDefault
-        return Intent.Web(clean, deep = deep)
+        if (strongSearch) {
+            val deep = Regex("(深入|详细|全面|仔细)").containsMatchIn(ql) || Prefs.deepDefault
+            return Intent.Web(clean, deep = deep)
+        }
+        // 13) 其余模糊地带（闲聊/情感/常识/主观求助/没想到的问法）→ 交给本地模型自己判断，
+        //     绝不写死"该不该搜"；决策兜底仍是搜索，保证不卡用户
+        return Intent.Ambiguous(clean)
     }
 }

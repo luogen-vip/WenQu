@@ -111,6 +111,12 @@ Java_com_wenqu_app_LlmJni_nativeComplete(JNIEnv* env, jobject thiz, jlong handle
     if (llama_decode(ctx, batch) != 0) return JNI_FALSE;
 
     llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // v1.9 复读根治：0.5B 小模型总结列表式材料时极易陷入复读循环（同一句话重复到打满
+    // max_tokens），答案里一条内容重复几遍、气泡又长又卡。加重复/频率/存在三重惩罚后，
+    // 已出现的 token 再次被选中的概率被显著压低，复读循环基本消失。
+    // last_n=96：跨段落依旧生效；repeat 1.35 + freq 0.25 + present 0.35：经验甜点，
+    // 既压复读又不过度伤害专业术语/人名的正常复现。
+    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(96, 1.35f, 0.25f, 0.35f));
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp > 0.01f ? temp : 0.7f));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.9f, 1));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(-1));

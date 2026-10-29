@@ -84,6 +84,56 @@ object TimeAnswer {
         return Intent.Time(s)
     }
 
+    /**
+     * v1.9：返回纯事实材料（不含任何固定文案），交给本地模型组织成自然回答。
+     * 解析不出（地点未知/不像时间问题）返回 null。
+     */
+    fun fact(raw: String): String? {
+        val q = raw.trim()
+        if (!isTimeQ(q) && !isDateQ(q)) return null
+        if (notNowRe.containsMatchIn(q)) return null
+
+        var place = q
+        for (w in listOf(
+            "请问", "问一下", "告诉me", "告诉我", "现在", "当前", "今天", "今日",
+            "几点了", "几点钟", "几点", "多少点", "什么时间", "时间是多少", "时间是", "时间",
+            "日期", "星期几", "礼拜几", "周几", "几号", "几日", "几月几号", "几月几日", "几月",
+            "多少号", "是多少", "是", "的", "了", "吗", "呢", "啊", "呀", "一下", "查查", "查下", "看看"
+        )) {
+            place = place.replace(w, "")
+        }
+        place = place.trim('，', '。', '？', '?', '！', '!', ' ', '，')
+        if (place.length > 8) return null
+
+        var zoneId: ZoneId? = null
+        var placeName = "本地"
+        if (place.isNotEmpty()) {
+            val hit = ZONES.entries.firstOrNull { place.contains(it.key) }
+            if (hit == null) return null
+            zoneId = ZoneId.of(hit.value)
+            placeName = hit.key
+        }
+
+        val t = ZonedDateTime.now(zoneId ?: ZoneId.systemDefault())
+        val diffH = Duration.between(ZonedDateTime.now(ZoneId.systemDefault()), t).toHours()
+        val dateStr = t.format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+        val timeStr = t.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        val week = weekCn[t.dayOfWeek.value - 1]
+
+        return buildString {
+            append("【时间事实（取自手机系统时钟，秒级准确）】")
+            append("$placeName 现在：$dateStr $timeStr，$week。")
+            if (zoneId != null) {
+                append("时区 ${zoneId.id}，")
+                append(when {
+                    diffH == 0L -> "与用户所在地时区相同"
+                    diffH > 0 -> "比用户所在地快 $diffH 小时"
+                    else -> "比用户所在地慢 ${-diffH} 小时"
+                }).append("。")
+            }
+        }
+    }
+
     /** 生成秒答；地点未知等无法本地回答时返回 null（由调用方回落到全网搜索） */
     fun tryAnswer(raw: String): String? {
         val q = raw.trim()

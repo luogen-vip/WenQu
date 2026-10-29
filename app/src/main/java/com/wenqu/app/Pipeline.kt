@@ -160,50 +160,21 @@ object ChatRepo {
                     if (SmallTalk.lastReply == "__GAME_START__") {
                         startGuessGame(msgId)
                     } else {
-                        // 本地大模型实时生成个性化回复（结合最近几轮对话），失败回退模板
-                        val ctx = recentChatContext()
-                        val llmReply = if (Llm.ready && Prefs.llmEnabled)
-                            runCatching {
-                                withTimeout(60_000L) {
-                                    Llm.complete(
-                                        "你是「问渠」APP 的助手小渠，作者罗根。你平时帮用户查全网资料、找图找视频、报天气报时间。现在用户在和你闲聊，请用中文自然回应：1-3句话，活泼友好、口语化，可以带点小幽默，不要用列表，不要自我介绍一长串。结合上下文回复。",
-                                        (if (ctx.isNotEmpty()) "最近对话：\n$ctx\n\n" else "") + "用户说：$userText",
-                                        120, 0.9f
-                                    )
-                                }
-                            }.getOrNull()
-                        else null
-                        finishText(msgId, llmReply ?: SmallTalk.lastReply)
+                        // v1.9：闲聊交给本地模型自由发挥（统一问渠人格），失败才用模板兜底
+                        chatFlow(msgId, userText, recentChatContext())
                     }
+                }
+                is Intent.Ambiguous -> {
+                    // v1.9 核心：模糊地带由本地模型自己决定"直接聊还是联网搜"，不写死
+                    ambiguousFlow(msgId, userText, route.q, lastQuery)
                 }
                 is Intent.Time -> {
-                    // 本地秒答优先；地点未知等无法本地回答时回落搜索
-                    val t = TimeAnswer.tryAnswer(route.q)
-                    if (t != null) finishText(msgId, t)
-                    else webFlow(msgId, Intent.Web(Nlp.stripPolite(route.q).ifEmpty { route.q }))
+                    // v1.9：本地算出时间事实 → 模型组织成自然回答（支持一句话多问：附天气事实）
+                    timeFlow(msgId, route.q, userText, lastQuery)
                 }
                 is Intent.WeatherQ -> {
-                    // 先判断是否说了地点：没说地点 → 反问澄清（这是正确行为，绝不乱搜）
-                    val place = Weather.extractPlace(route.q)
-                    if (place.isEmpty() && !route.q.contains(Regex("[的]\\s*(今天|明天)"))) {
-                        Db.touchConv(currentConvId, gameState = "clarify:weather")
-                        finishText(
-                            msgId,
-                            "你想知道哪个地方的天气呀？告诉我地名就行，比如「保山」「上海」或「云南腾冲」，我马上帮你查实时天气。"
-                        )
-                        return
-                    }
-                    // 气象接口（Open-Meteo → wttr.in 多源级联）秒答；全部失败也不卡死：
-                    // 把"XX 天气"交给全网搜索+模型总结，答案里带时效提示，绝不再弹"接口没连上"干等
-                    val w = runCatching { Weather.tryAnswer(route.q) }.getOrNull()
-                    if (w != null) {
-                        Db.touchConv(currentConvId, gameState = "")
-                        finishText(msgId, w)
-                    } else {
-                        Db.touchConv(currentConvId, gameState = "")
-                        val placeGuess = place.ifEmpty { Nlp.extractTopic(route.q).ifEmpty { route.q } }
-                        webFlow(msgId, Intent.Web("$placeGuess 天气 今天 实时", deep = false))
-                    }
+                    // v1.9：气象双源拉事实 → 模型组织回答（多问题全答、地点可沿用上一轮、反问也由模型生成）
+                    weatherFlow(msgId, route.q, lastQuery)
                 }
                 is String -> if (route.startsWith("GUESS:")) guessStep(msgId, route.removePrefix("GUESS:").toIntOrNull() ?: 50, conv)
                 is Intent.GameQuit -> {
@@ -211,14 +182,21 @@ object ChatRepo {
                     finishText(msgId, "好，游戏告一段落。想查什么随时说，我的全网雷达一直开着。")
                 }
                 is Intent.Recall -> {
+                    // v1.9：上句是事实，表述交给模型生成
                     val prev = Db.prevUserText(currentConvId)
-                    finishText(
-                        msgId,
-                        if (prev.isEmpty())
-                            "这是我们这通对话的第一句哦，你的「上一个问题」还没诞生呢。要不现在来一个？"
-                        else
-                            "你上一句问的是：「${prev}」\n\n想让我继续深挖这个话题就说「继续查」，或者直接抛新问题给我。"
-                    )
+                    val fact = if (prev.isEmpty())
+                        "【上下文事实】这是我们这通对话的第一句，用户之前没有问过任何问题。"
+                    else
+                        "【上下文事实】用户上一句问的是：「${prev}」"
+                    if (!factAnswer(msgId, userText, listOf(fact), "", 90)) {
+                        finishText(
+                            msgId,
+                            if (prev.isEmpty())
+                                "这是我们这通对话的第一句哦，你的「上一个问题」还没诞生呢。要不现在来一个？"
+                            else
+                                "你上一句问的是：「${prev}」\n\n想让我继续深挖这个话题就说「继续查」，或者直接抛新问题给我。"
+                        )
+                    }
                 }
                 is Intent.Math -> mathFlow(msgId, userText, route)
                 is Intent.Image -> imageFlow(msgId, route.q, route.more, route.count)
@@ -240,28 +218,207 @@ object ChatRepo {
         } catch (_: Exception) { "" }
     }
 
-    /** 口算：本地精确计算保底；若用户附加了语气/风格条件，由本地大模型按要求润色（数值绝不改动） */
+    /**
+     * v1.9 口算：本地精确计算结果作为「事实材料」交给模型组织回答（数值不可改动），
+     * 用户要求的风格（幽默/严肃/方言腔…）一并交给模型发挥；模型不可用才落到规则文案。
+     */
     private suspend fun mathFlow(msgId: Long, userText: String, route: Intent.Math) {
-        val base = MathEval.answerText(route.expr, route.result)
         val style = Nlp.styleReq(userText)
-        if (style != null && Llm.ready) {
+        val mat = buildString {
+            append("【计算事实（本地精确计算，结果唯一正确，绝不可改动数值）】")
+            append(route.expr).append(" = ").append(route.result)
+            if (style != null) append("\n用户指定的回答风格：").append(style)
+        }
+        if (factAnswer(msgId, userText, listOf(mat), recentChatContext(), 130)) return
+        finishText(msgId, MathEval.answerText(route.expr, route.result))
+    }
+
+    // ---------------- v1.9：闲聊 / 模糊决策 / 事实型回答 ----------------
+
+    /**
+     * 闲聊/情感/常识：不带任何搜索材料，本地模型结合上文自由发挥。
+     * 模型不可用或失败 → SmallTalk 规则兜底（保证永远有回应）。
+     */
+    private suspend fun chatFlow(msgId: Long, userText: String, ctx: String) {
+        if (Llm.ready && Prefs.llmEnabled) {
+            val usr = (if (ctx.isNotEmpty()) "最近对话：\n$ctx\n\n" else "") + "用户说：" + userText
+            update(msgId) { it.copy(text = "", searching = false, streaming = true) }
+            val th = Agent.Throttled(90)
             val t = runCatching {
-                withTimeout(60_000L) {
-                    Llm.complete(
-                        "你是「问渠」APP 的助手小渠。用户问了一个计算题并指定了回答风格。题目已经过本地精确计算，结果是唯一正确答案：" +
-                                "${route.expr} = ${route.result}。请严格用「$style」的语气风格，用1-3句话自然地告诉用户答案。" +
-                                "铁律：数值必须等于 $route.result，绝不能改变数值，也不要发明其他数字。",
-                        "用户题目：$userText",
-                        130, 0.8f
-                    )
+                withTimeout(90_000L) {
+                    Llm.complete(Agent.CHAT_SYS, usr, 160, 0.85f) { partial ->
+                        if (th.allow()) update(msgId) { it.copy(text = partial) }
+                    }
                 }
             }.getOrNull()
-            if (t != null) {
-                finishText(msgId, "$t\n\n（本地精确计算：${route.expr} = ${route.result}）")
-                return
+            if (!t.isNullOrBlank()) {
+                val clean = Agent.sanitize(t)
+                if (clean.length >= 2) {
+                    finishRaw(msgId, clean)
+                    Db.touchConv(currentConvId)
+                    return
+                }
             }
         }
-        finishText(msgId, base)
+        SmallTalk.match(userText)?.let { m ->
+            if (m == "__GAME_START__") { startGuessGame(msgId); return }
+            finishText(msgId, m)
+            return
+        }
+        finishText(msgId, "我在呢！刚才思路卡了一下，你再说一遍或者换个说法，我马上接住～")
+    }
+
+    /**
+     * 模糊地带：由本地模型先决策（CHAT/SEARCH/WEATHER/TIME/MATH/IMAGE/VIDEO），
+     * 决策结果再回落到对应流程做二次校验（决策说 TIME 但解析不出时间 → 落搜索），稳而不死。
+     */
+    private suspend fun ambiguousFlow(msgId: Long, userText: String, clean: String, lastQuery: String) {
+        val ctx = recentChatContext()
+        update(msgId) { it.copy(text = "小渠正在思考怎么回答最合适……", searching = true, engineStates = emptyList()) }
+        when (val d = Agent.decide(userText, ctx)) {
+            is Agent.Decision.Chat -> chatFlow(msgId, userText, ctx)
+            is Agent.Decision.Weather -> {
+                val place = Weather.extractPlace(userText).ifEmpty { Weather.extractPlace(lastQuery) }
+                if (place.isNotEmpty()) weatherAnswer(msgId, userText, place, ctx)
+                else webFlow(msgId, Intent.Web(clean))
+            }
+            is Agent.Decision.Time -> {
+                if (TimeAnswer.fact(userText) != null) timeFlow(msgId, userText, userText, lastQuery)
+                else webFlow(msgId, Intent.Web(clean))
+            }
+            is Agent.Decision.Math -> {
+                val m = MathEval.tryEval(userText)
+                if (m != null) mathFlow(msgId, userText, Intent.Math(m.first, m.second))
+                else webFlow(msgId, Intent.Web(clean))
+            }
+            is Agent.Decision.Image -> imageFlow(
+                msgId, Nlp.extractTopic(d.query).ifEmpty { d.query }, false, Nlp.mediaCount(userText)
+            )
+            is Agent.Decision.Video -> {
+                val vq = Nlp.videoQuery(d.query)
+                videoFlow(msgId, vq.first, false, Nlp.mediaCount(userText), vq.second)
+            }
+            is Agent.Decision.Web -> webFlow(msgId, Intent.Web(d.query))
+            Agent.Decision.FallbackSearch -> webFlow(msgId, Intent.Web(clean))
+        }
+    }
+
+    /** 时间/日期：本地时钟事实 → 模型组织；一句话里还夹了天气问题就把天气事实一并附上（多问全答） */
+    private suspend fun timeFlow(msgId: Long, q: String, userText: String, lastQuery: String) {
+        val fact = TimeAnswer.fact(q) ?: TimeAnswer.fact(userText)
+        if (fact == null) {
+            webFlow(msgId, Intent.Web(Nlp.stripPolite(q).ifEmpty { q }))
+            return
+        }
+        val mats = ArrayList<String>()
+        mats.add(fact)
+        if (Regex("(天气|气温|温度|多少度|几度|下雨|下雪|冷不冷|热不热)").containsMatchIn(userText)) {
+            val place = Weather.extractPlace(userText).ifEmpty { Weather.extractPlace(lastQuery) }
+            if (place.isNotEmpty()) {
+                runCatching { Weather.fetchFact(place) }.getOrNull()?.let { mats.add(Weather.factToMaterial(it)) }
+            }
+        }
+        if (!factAnswer(msgId, userText, mats, recentChatContext(), 140)) {
+            finishText(msgId, TimeAnswer.tryAnswer(q) ?: "现在是 $fact。")
+        }
+    }
+
+    /** 天气流程：地点解析 → 上下文继承 → 双源事实 → 模型组织（多问题全答）；反问也由模型生成 */
+    private suspend fun weatherFlow(msgId: Long, q: String, lastQuery: String) {
+        var place = Weather.extractPlace(q)
+        val multi = q.count { it == '？' || it == '?' } >= 2 ||
+                Regex("(几号|几日|星期几|周几|几点|几月|日期)").containsMatchIn(q)
+
+        if (place.isEmpty()) {
+            // 短追问（"明天呢"/"后天怎么"）沿用上一轮天气话题的地点
+            if (lastQuery.isNotEmpty() && q.length <= 12 &&
+                Regex("(呢|那|再|明天|后天|大后天|周末|接下来|然后|换)").containsMatchIn(q)
+            ) {
+                place = Weather.extractPlace(lastQuery)
+            }
+        }
+
+        if (place.isEmpty() && !multi) {
+            // 纯天气问题但没说地点：让模型自然反问（不是模板）；同时进入澄清状态
+            val mat = "【上下文事实】用户想查天气，但没有说想查哪个地方的天气。" +
+                    (if (lastQuery.isNotEmpty()) "上一轮话题：$lastQuery。" else "") +
+                    "请用一两句话自然地问清用户想查哪里的天气（可举两个地名例子），不要查任何数据。"
+            Db.touchConv(currentConvId, gameState = "clarify:weather")
+            if (!factAnswer(msgId, q, listOf(mat), recentChatContext(), 90)) {
+                finishText(
+                    msgId,
+                    "你想知道哪个地方的天气呀？告诉我地名就行，比如「保山」「上海」或「云南腾冲」，我马上帮你查实时天气。"
+                )
+            }
+            return
+        }
+        weatherAnswer(msgId, q, place, recentChatContext())
+    }
+
+    /** 天气回答主体：双源事实 → 模型组织；多问题时附时间事实；全挂走搜索兜底 */
+    private suspend fun weatherAnswer(msgId: Long, userText: String, place: String, ctx: String) {
+        Db.touchConv(currentConvId, gameState = "")
+        val mats = ArrayList<String>()
+        if (place.isNotEmpty()) {
+            val f = runCatching { Weather.fetchFact(place) }.getOrNull()
+            if (f != null) mats.add(Weather.factToMaterial(f))
+        }
+        if (mats.isEmpty()) {
+            val placeGuess = place.ifEmpty { Nlp.extractTopic(userText).ifEmpty { userText } }
+            webFlow(msgId, Intent.Web("$placeGuess 天气 今天 实时", deep = false))
+            return
+        }
+        // 多问题：同一条消息里还问了日期/星期/几点 → 附时间事实，问了几个就答几个
+        if (Regex("(几号|几日|星期几|周几|几点|几月|日期)").containsMatchIn(userText)) {
+            TimeAnswer.fact(userText)?.let { mats.add(it) }
+        }
+        if (!factAnswer(msgId, userText, mats, ctx, 200)) {
+            val w = runCatching { Weather.tryAnswer(userText) }.getOrNull()
+            if (w != null) finishText(msgId, w)
+            else webFlow(msgId, Intent.Web("$place 天气 今天 实时", deep = false))
+        }
+    }
+
+    /**
+     * v1.9 通用「事实 → 模型组织」管线（时间/天气/计算/回忆共用）：
+     * - 材料只含可靠事实（系统时钟/精确计算/实时气象/上文记录），不编造；
+     * - 回复全文由模型实时生成，支持一句多问全答、可带 emoji；
+     * - 流式 90ms 节流；失败返回 false，调用方走各自兜底。
+     */
+    private suspend fun factAnswer(
+        msgId: Long,
+        userText: String,
+        materials: List<String>,
+        ctx: String,
+        maxTokens: Int
+    ): Boolean {
+        if (!Llm.ready || !Prefs.llmEnabled) return false
+        update(msgId) { it.copy(text = "", searching = false, streaming = true) }
+        val sys = Agent.PERSONA +
+                "\n当前场景：你刚用工具拿到了可靠事实（系统时钟/本地精确计算/实时气象接口/对话记录），" +
+                "下面给你「对话上文 + 用户这条消息 + 事实数据」。\n" +
+                "要求：\n" +
+                "1. 用事实数据组织成自然、亲切的中文回答，数值必须原样引用，绝不能改动或编造；\n" +
+                "2. 用户这条消息里问了几个问题（哪怕只带出一个词）就逐个都答到；\n" +
+                "3. 事实里没有的信息不要编；天气类可以给一句贴心提醒（穿衣/带伞），不要长篇大论；\n" +
+                "4. 2~5 句话说完，不要列表符号，可以带一两个 emoji。只输出回答正文。"
+        val usr = (if (ctx.isNotEmpty()) "对话上文：$ctx\n\n" else "") +
+                "用户消息：$userText\n\n事实数据：\n" + materials.joinToString("\n\n")
+        val usrSafe = if (usr.length > 1200) usr.take(1200) + "…（已截断）" else usr
+        val th = Agent.Throttled(90)
+        val t = runCatching {
+            withTimeout(90_000L) {
+                Llm.complete(sys, usrSafe, maxTokens, 0.7f) { partial ->
+                    if (th.allow()) update(msgId) { it.copy(text = partial) }
+                }
+            }
+        }.getOrNull()
+        if (t.isNullOrBlank()) return false
+        val clean = Agent.sanitize(t)
+        if (clean.length < 2) return false
+        finishRaw(msgId, clean)
+        Db.touchConv(currentConvId)
+        return true
     }
 
     // ---------------- 全网搜索（本地大模型总结） ----------------
@@ -293,10 +450,9 @@ object ChatRepo {
             blocks.add("[${idx + 1}]（${h}）" + sents.take(2).joinToString(""))
             seenHost[h] = (seenHost[h] ?: 0) + 1
         }
-        // v1.8 关键修复：材料总长硬预算（≈1150字，Qwen 分词后 ≤1200 token）。
-        // 旧版不预算，长摘要会让 prompt 超出模型上下文，native 层静默返回失败 → 全部回退到
-        // 老规则合成 —— 用户看到的"一条条不相关结果"很大程度就是这么来的。
-        var budget = 1150
+        // v1.8/v1.9 关键：材料总长硬预算（≈800字，Qwen 分词后 ≤850 token）。
+        // 材料越短 prefill 越快（用户要求"回复要快"），也绝不超出模型上下文导致静默回退。
+        var budget = 800
         val limited = ArrayList<String>()
         for (b in blocks) {
             if (budget <= 0) break
@@ -371,32 +527,31 @@ object ChatRepo {
                         engineStates = emptyList()
                     )
                 }
-                val sys = "你是「问渠」APP 的回答整理引擎，叫小渠。用户给你一个问题和若干带编号的搜索材料。" +
-                        "要求：\n" +
-                        "1. 只回答问题本身：先直接给出答案（定义/结论/数字），再补充必要细节；\n" +
-                        "2. 材料里与问题无关的内容（广告、相关推荐、其他新闻、别的词条）一律忽略，绝不能混进答案；\n" +
-                        "3. 用中文回答，2-5句话，连贯自然像人说话，不要罗列要点符号，不要用「根据搜索结果」这类开头；\n" +
-                        "4. 材料里没有的信息绝不能编造；\n" +
-                        "5. 如果材料确实答不了这个问题，用一两句话诚实说明材料里有什么、缺什么。\n" +
-                        "只输出回答正文。"
-                val usr = "问题：$q\n\n搜索材料：\n$materials"
+                val ctx = recentChatContext()
+                val sys = Agent.ANSWER_SYS
+                val usr = (if (ctx.isNotEmpty()) "对话上文：$ctx\n\n" else "") +
+                        "用户这条消息：$q\n\n搜索材料：\n$materials"
                 // 双保险：即便极端情况下材料仍偏长，也在送模型前截断，绝不越上下文
-                val usrSafe = if (usr.length > 1400) usr.take(1400) + "…（材料过长已截断）" else usr
+                val usrSafe = if (usr.length > 1250) usr.take(1250) + "…（材料过长已截断）" else usr
+                val th = Agent.Throttled(90)
                 val t = runCatching {
                     withTimeout(120_000L) {
-                        Llm.complete(sys, usrSafe, 320, 0.7f) { partial ->
-                            update(msgId) { it.copy(text = partial) }
+                        Llm.complete(sys, usrSafe, 240, 0.65f) { partial ->
+                            if (th.allow()) update(msgId) { it.copy(text = partial) }
                         }
                     }
                 }.getOrNull()
                 if (!t.isNullOrBlank()) {
-                    val sugg = buildList {
-                        add("再查查")
-                        if (imgs.isNotEmpty()) add("换一批") else add("换个说法再问")
+                    val clean = Agent.sanitize(t)
+                    if (clean.length >= 2) {
+                        val sugg = buildList {
+                            add("再查查")
+                            if (imgs.isNotEmpty()) add("换一批") else add("换个说法再问")
+                        }
+                        finishRaw(msgId, clean, refs, imgs, vids, q, suggestions = sugg)
+                        Db.touchConv(currentConvId, lastQuery = q)
+                        return
                     }
-                    finishRaw(msgId, t.trim(), refs, imgs, vids, q, suggestions = sugg)
-                    Db.touchConv(currentConvId, lastQuery = q)
-                    return
                 }
                 // 模型失败 → 走下面的规则合成兜底
             }
@@ -661,10 +816,10 @@ object ChatRepo {
     private suspend fun finishRaw(
         msgId: Long,
         text: String,
-        sources: List<SourceRef>,
-        images: List<MediaResult>,
-        videos: List<MediaResult>,
-        query: String,
+        sources: List<SourceRef> = emptyList(),
+        images: List<MediaResult> = emptyList(),
+        videos: List<MediaResult> = emptyList(),
+        query: String = "",
         suggestions: List<String> = emptyList()
     ) {
         update(msgId) {
@@ -700,9 +855,9 @@ object ChatRepo {
         update(msgId) { it.copy(text = "", searching = false, streaming = true, sources = sources) }
         var i = 0
         while (i < text.length) {
-            i = minOf(text.length, i + 3)
+            i = minOf(text.length, i + 6)
             update(msgId) { it.copy(text = text.substring(0, i)) }
-            delay(15)
+            delay(35)
         }
         update(msgId) {
             it.copy(text = text, streaming = false, images = images, videos = videos, suggestions = suggestions, query = query)

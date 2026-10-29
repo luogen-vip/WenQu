@@ -132,8 +132,10 @@ fun ChatScreen(
         scope.launch { drawerState.close() }
     }
 
-    // 滚动策略：只在"用户本来贴着底部"时才自动跟随（新消息/流式增长）；
-    // 用户在上方翻历史时绝不打扰；listState 由外部持有，进出二级页面/点开网页再返回位置不丢。
+    // 滚动策略：
+    // - 消息条数变化（发送/切会话）→ 无条件贴底：用户刚发的问题必须立刻可见，箭头也不闪现；
+    // - 流式增长 → 只在贴底时跟随，翻历史时绝不打扰；
+    // - listState 由外部持有，进出二级页面/点开网页再返回位置不丢。
     val atBottom by remember {
         androidx.compose.runtime.derivedStateOf {
             val inf = listState.layoutInfo
@@ -142,11 +144,22 @@ fun ChatScreen(
         }
     }
     LaunchedEffect(msgs.size) {
-        if (msgs.isNotEmpty() && atBottom) listState.scrollToItem(msgs.size - 1)
+        if (msgs.isNotEmpty()) listState.scrollToItem(msgs.size - 1)
     }
     val lastLen = msgs.lastOrNull()?.text?.length ?: 0
     LaunchedEffect(lastLen) {
         if (msgs.isNotEmpty() && atBottom) listState.scrollToItem(msgs.size - 1)
+    }
+    // 回到底部按钮：真正离开底部 500ms 后才出现（发送/流式时的抖动不闪现），
+    // 位置改在底部居中（胶囊形，比右下角更顺手也更对称）
+    var showJump by remember { mutableStateOf(false) }
+    LaunchedEffect(atBottom) {
+        if (atBottom) {
+            showJump = false
+        } else {
+            kotlinx.coroutines.delay(500)
+            if (!atBottom) showJump = true
+        }
     }
 
     ModalNavigationDrawer(
@@ -279,7 +292,7 @@ fun ChatScreen(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        items(msgs, key = { it.id }) { m ->
+                        items(msgs, key = { it.id }, contentType = { it.role }) { m ->
                             MessageItem(
                                 m = m,
                                 speaking = speaking,
@@ -293,24 +306,28 @@ fun ChatScreen(
                             )
                         }
                     }
-                    // 不在底部时显示“回到底部”悬浮箭头，一点到底
-                    if (!atBottom) {
+                    // 离开底部后（去抖 500ms）显示：底部居中胶囊，一点到底
+                    if (showJump) {
                         Surface(
-                            shape = CircleShape,
+                            shape = RoundedCornerShape(50),
                             color = MaterialTheme.colorScheme.primary,
                             shadowElevation = 4.dp,
                             modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 16.dp, bottom = 18.dp)
-                                .size(42.dp)
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 18.dp)
                                 .clickable { scope.launch { listState.animateScrollToItem(msgs.size - 1) } }
                         ) {
-                            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
                                 Icon(
                                     Icons.Default.ArrowDownward, "回到底部",
                                     tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
+                                Spacer(Modifier.size(5.dp))
+                                Text("回到底部", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimary)
                             }
                         }
                     }
@@ -332,14 +349,15 @@ fun ChatScreen(
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        "问渠 WenQu v1.8\n作者：罗根\n\n" +
+                        "问渠 WenQu v1.9\n作者：罗根\n\n" +
                                 "完全开源的全网聚合搜索问答助手，内置本地大模型：\n\n" +
-                                "· 内置本地大模型（Qwen2.5，随 APK 离线携带）：搜索完成后由它阅读材料、理解问题，实时总结成直接回答，不走固定模板\n" +
-                                "· 必应/必应中国/百度/搜狗/360/神马/头条 多路引擎并行抓取，谁抽风换谁上\n" +
-                                "· 图片多主体同时找（“孙悟空和熊出没”两张都找）、过滤推广图\n" +
-                                "· 天气/时间/计算本地秒答，没说地点会反问你\n" +
-                                "· 上下文记忆持久保存，重启不丢\n" +
-                                "· 语音朗读、流式输出、来源可溯源\n\n" +
+                                "· 内置本地大模型（Qwen2.5，随 APK 离线携带）：回答的每一个字都由模型实时生成，不走固定模板\n" +
+                                "· 模型自己决定该不该联网：闲聊/情感直接聊，资讯事实才搜索，还能改写最优搜索词\n" +
+                                "· 搜索总结紧扣你的问题：取长补短重写答案，绝不罗列无关网页\n" +
+                                "· 时间/天气/计算：本地精准事实 + 模型自然表达，一句话多问也逐个都答\n" +
+                                "· 必应/必应中国/百度/搜狗/360/神马/头条 多路引擎并行抓取，点引擎名可看它搜到了什么\n" +
+                                "· 图片多主体同时找、视频语义搜索（好看的视频=真热门口碑，不是标题匹配）\n" +
+                                "· 上下文记忆持久保存，语音朗读、流式输出、来源可溯源\n\n" +
                                 "本应用 100% 开源（MIT License），不含闭源组件与追踪 SDK。\n" +
                                 "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines、llama.cpp、Qwen2.5（Apache-2.0），均遵循其各自开源协议。",
                         fontSize = 13.sp, lineHeight = 20.sp

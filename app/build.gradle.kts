@@ -14,8 +14,8 @@ android {
         applicationId = "com.wenqu.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.8"
+        versionCode = 9
+        versionName = "1.9"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
