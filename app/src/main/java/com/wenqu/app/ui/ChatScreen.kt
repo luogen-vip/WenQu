@@ -332,7 +332,7 @@ fun ChatScreen(
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        "问渠 WenQu v1.3\n作者：罗根\n\n" +
+                        "问渠 WenQu v1.8\n作者：罗根\n\n" +
                                 "完全开源的全网聚合搜索问答助手，内置本地大模型：\n\n" +
                                 "· 内置本地大模型（Qwen2.5，随 APK 离线携带）：搜索完成后由它阅读材料、理解问题，实时总结成直接回答，不走固定模板\n" +
                                 "· 必应/必应中国/百度/搜狗/360/神马/头条 多路引擎并行抓取，谁抽风换谁上\n" +

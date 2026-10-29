@@ -181,8 +181,40 @@ object VideoSearcher {
                 val author = o.optString("author")
                 val duration = o.optString("duration")
                 val pic = o.optString("pic").replace("http://", "https://")
-                // 桌面版网页在 WebView 里最稳（m 站会跳拉起 APP/登录导致"网页无法打开"）
-                out.add(MediaResult(title, pic, "https://www.bilibili.com/video/$bvid", "哔哩哔哩", "$author · $duration"))
+                out.add(MediaResult(title, pic, biliPlayer(bvid), "哔哩哔哩", "$author · $duration"))
+            }
+        } catch (_: Exception) {}
+        out
+    }
+    /** B站官方外嵌播放器：无需登录，WebView 可直接播放（v1.8 修复"只有封面/提示至APP内体验"） */
+    private fun biliPlayer(bvid: String): String =
+        "https://player.bilibili.com/player.html?bvid=$bvid&autoplay=1&high_quality=1&danmaku=0"
+
+    /**
+     * B站全站热门榜（免登录开放接口）：用户说"推荐好看的视频"时用 ——
+     * 这里的视频是真·全民看出来的，而不是标题碰巧含"好看"两个字的
+     */
+    suspend fun fromBilibiliPopular(page: Int, count: Int): List<MediaResult> = withContext(Dispatchers.IO) {
+        val out = ArrayList<MediaResult>()
+        try {
+            Http.get("https://www.bilibili.com/", "https://www.bilibili.com/", callTimeoutSec = 8)
+            val api = "https://api.bilibili.com/x/web-interface/popular?ps=20&pn=$page"
+            val js = Http.get(api, "https://www.bilibili.com/", Http.mobileUA(), callTimeoutSec = 9)
+                ?: return@withContext out
+            val root = JSONObject(js)
+            if (root.optInt("code", -1) != 0) return@withContext out
+            val list = root.optJSONObject("data")?.optJSONArray("list") ?: return@withContext out
+            for (i in 0 until list.length()) {
+                if (out.size >= count) break
+                val o = list.getJSONObject(i)
+                val bvid = o.optString("bvid")
+                if (bvid.isEmpty()) continue
+                val title = Jsoup.parse(o.optString("title")).text()
+                val author = o.optJSONObject("owner")?.optString("name").takeUnless { it.isNullOrEmpty() }
+                    ?: o.optString("author")
+                val duration = o.optString("duration")
+                val pic = o.optString("pic").replace("http://", "https://")
+                out.add(MediaResult(title.take(60), pic, biliPlayer(bvid), "哔哩哔哩", "$author · $duration"))
             }
         } catch (_: Exception) {}
         out

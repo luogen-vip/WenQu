@@ -335,7 +335,7 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
         }
 
         SettingCard("关于") {
-            Text("问渠 WenQu v1.3", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("问渠 WenQu v1.8", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text("作者：罗根", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             Text(

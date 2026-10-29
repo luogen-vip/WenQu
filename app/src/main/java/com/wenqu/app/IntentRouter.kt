@@ -7,7 +7,7 @@ sealed class Intent {
     data class WeatherQ(val q: String) : Intent()
     data class Web(val q: String, val deep: Boolean = false, val reanswer: Boolean = false) : Intent()
     data class Image(val q: String, val more: Boolean, val count: Int = 0) : Intent()
-    data class Video(val q: String, val more: Boolean, val count: Int = 0) : Intent()
+    data class Video(val q: String, val more: Boolean, val count: Int = 0, val popular: Boolean = false) : Intent()
     data class Url(val brand: String) : Intent()
     data class Math(val expr: String, val result: String) : Intent()
     object Recall : Intent()
@@ -111,10 +111,13 @@ object IntentRouter {
             if (sq.isNotEmpty()) return Intent.Image(sq, more = false, count = Nlp.mediaCount(q).coerceAtLeast(4))
         }
 
-        // 10) 视频请求
+        // 10) 视频请求（"给我推荐一些好看的视频" → 没有具体题材 → popular=true 走热门口碑榜，
+        //     绝不拿"好看"当搜索词去匹配标题；有具体题材（"好看的科幻电影"）→ 题材+质量词）
         if (vidKeyword.containsMatchIn(q)) {
-            val sq = Nlp.extractTopic(q).ifEmpty { lastQuery }
-            if (sq.isNotEmpty()) return Intent.Video(sq, more = false, count = Nlp.mediaCount(q))
+            val vq = Nlp.videoQuery(q)
+            if (vq.first.isNotEmpty() || vq.second) {
+                return Intent.Video(vq.first, more = false, count = Nlp.mediaCount(q), popular = vq.second)
+            }
         }
 
         // 11) 找网址/官网/链接

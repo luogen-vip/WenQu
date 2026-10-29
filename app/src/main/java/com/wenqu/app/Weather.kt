@@ -97,6 +97,22 @@ object Weather {
 
     private val ADMIN_SUFFIX = Regex("(市|区|县|省|自治州|自治区|特别行政区)$")
 
+    /** wttr.in 用的 WWO 天气码 → 中文描述 */
+    private val WWO = mapOf(
+        113 to "晴", 116 to "多云", 119 to "阴", 122 to "阴", 143 to "有雾", 248 to "有雾", 260 to "雾凇",
+        176 to "阵雨", 185 to "冻毛毛雨", 263 to "毛毛雨", 266 to "毛毛雨", 281 to "小雨", 284 to "冻雨",
+        293 to "小雨", 296 to "中雨", 299 to "中雨", 302 to "中雨", 305 to "大雨", 308 to "大雨",
+        311 to "冻雨", 314 to "冻雨", 350 to "冻雨", 374 to "阵雨伴冰雹", 377 to "阵雨伴冰雹",
+        200 to "雷阵雨", 386 to "雷阵雨", 389 to "强雷雨", 392 to "雷伴雪", 395 to "强雷雪",
+        179 to "小雪", 227 to "中雪", 230 to "大雪", 323 to "小雪", 326 to "中雪", 329 to "大雪",
+        332 to "大雪", 335 to "大雪", 338 to "大雪", 362 to "雨夹雪", 365 to "雨夹雪", 368 to "阵雪", 371 to "阵雪"
+    )
+    private val DIR16 = mapOf(
+        "N" to "北风", "NNE" to "东北风", "NE" to "东北风", "ENE" to "东风", "E" to "东风", "ESE" to "东南风",
+        "SE" to "东南风", "SSE" to "南风", "S" to "南风", "SSW" to "西南风", "SW" to "西南风", "WSW" to "西风",
+        "W" to "西风", "WNW" to "西北风", "NW" to "西北风", "NNW" to "北风"
+    )
+
     private fun codeDesc(c: Int): String = CODES[c] ?: "天气多变"
     private fun windDir(d: Double): String = DIRS[((d % 360 + 360) % 360 / 45 + 0.5).toInt() % 8]
 
@@ -186,14 +202,70 @@ object Weather {
         val place = extractPlace(q)
         if (place.isEmpty()) return@withContext null
 
-        val geo = geocode(place) ?: return@withContext null
-        fetchAndRender(geo, q)
+        // 多源级联（v1.8）：Open-Meteo → wttr.in，一个挂了另一个上，绝不轻易让用户白问
+        val geo = geocode(place)
+        val viaOma = geo?.let { runCatching { fetchAndRender(it, q) }.getOrNull() }
+        if (!viaOma.isNullOrBlank()) return@withContext viaOma
+        return@withContext runCatching { wttrAnswer(place, q) }.getOrNull()
     }
 
     /** 直接按地名查（澄清流程用） */
     suspend fun answerFor(place: String, tomorrow: Boolean = false): String? = withContext(Dispatchers.IO) {
-        val geo = geocode(place) ?: return@withContext null
-        fetchAndRender(geo, if (tomorrow) "明天天气" else "今天天气")
+        val geo = geocode(place)
+        val viaOma = geo?.let { runCatching { fetchAndRender(it, if (tomorrow) "明天天气" else "今天天气") }.getOrNull() }
+        if (!viaOma.isNullOrBlank()) return@withContext viaOma
+        return@withContext runCatching { wttrAnswer(place, if (tomorrow) "明天天气" else "今天天气") }.getOrNull()
+    }
+
+    /** wttr.in 备源（无需地理编码，直接地名查询；国内可达性优于 Open-Meteo） */
+    private suspend fun wttrAnswer(place: String, q: String): String? = withContext(Dispatchers.IO) {
+        val js = Http.get("https://wttr.in/${Nlp.enc(place)}?format=j1", callTimeoutSec = 10)
+            ?: return@withContext null
+        try {
+            val o = JSONObject(js)
+            val cur = o.getJSONArray("current_condition").getJSONObject(0)
+            val t = cur.optString("temp_C").toDoubleOrNull() ?: return@withContext null
+            val feels = cur.optString("FeelsLikeC").toDoubleOrNull() ?: t
+            val hum = cur.optString("humidity").toDoubleOrNull() ?: 0.0
+            val code = cur.optInt("weatherCode", 0)
+            val ws = cur.optString("windspeedKmph").toDoubleOrNull() ?: 0.0
+            val wd = DIR16[cur.optString("winddir16Point")] ?: "风"
+
+            val sb = StringBuilder()
+            sb.append("「").append(place).append("」现在的天气：\n\n")
+            sb.append(WWO[code] ?: "天气多变").append("，").append(String.format("%.1f", t)).append("°C")
+            sb.append("（体感 ").append(String.format("%.1f", feels)).append("°C）\n")
+            sb.append(wd).append(" ").append(String.format("%.0f", ws)).append(" km/h · 湿度 ")
+                .append(String.format("%.0f", hum)).append("%\n")
+
+            val days = o.optJSONArray("weather")
+            if (days != null && days.length() > 0) {
+                val tomorrow = Regex("明天").containsMatchIn(q)
+                val startIdx = if (tomorrow && days.length() > 1) 1 else 0
+                val labels = listOf("今天", "明天", "后天")
+                sb.append("\n")
+                for (i in startIdx until minOf(startIdx + 2, days.length())) {
+                    val d = days.getJSONObject(i)
+                    val dcode = d.optJSONArray("hourly")
+                        ?.let { h ->
+                            var best = 113
+                            for (j in 0 until h.length()) {
+                                if (h.getJSONObject(j).optString("time") == "1200") {
+                                    best = h.getJSONObject(j).optInt("weatherCode", 113); break
+                                }
+                            }
+                            best
+                        } ?: 113
+                    sb.append(labels.getOrNull(i) ?: "").append("：")
+                        .append(d.optString("mintempC")).append("~").append(d.optString("maxtempC"))
+                        .append("°C，").append(WWO[dcode] ?: "天气多变").append("\n")
+                }
+            }
+            sb.append("\n数据来自 wttr.in 开源气象服务，实时查询。要不要我顺便找找当地的实时资讯？")
+            sb.toString()
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun fetchAndRender(geo: Geo, q: String): String? = withContext(Dispatchers.IO) {

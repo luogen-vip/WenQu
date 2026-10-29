@@ -36,7 +36,7 @@ object Llm {
     private var handle = 0L
     private val mutex = Mutex()
 
-    private const val N_CTX = 1792
+    private const val N_CTX = 2048
     private const val MODEL_LIB = "libmodel.so"
 
     /** App 启动时后台加载（不阻塞 UI）；成功后做一次预热生成拉起 mmap 页 */
@@ -56,7 +56,8 @@ object Llm {
                     return@launch
                 }
                 val cores = Runtime.getRuntime().availableProcessors()
-                val threads = (cores - 1).coerceIn(3, 6)
+                // 保守线程数：低端机 6 线程易过热降频反而更慢，2~4 是甜点位
+                val threads = (cores - 1).coerceIn(2, 4)
                 val h = withContext(Dispatchers.IO) { jni.nativeLoad(f.absolutePath, N_CTX, threads) }
                 if (h == 0L) {
                     _state.value = St.Failed("模型加载失败（内存不足或文件损坏）")
@@ -87,7 +88,7 @@ object Llm {
     suspend fun complete(
         system: String,
         user: String,
-        maxTokens: Int = 240,
+        maxTokens: Int = 320,
         temp: Float = 0.72f,
         onDelta: (String) -> Unit = {}
     ): String? = mutex.withLock {

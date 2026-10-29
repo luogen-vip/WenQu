@@ -12,3 +12,5 @@
 app/src/main/cpp/llama/
 # 本地大模型真文件由 CI 下载（仓库里只有占位文件）
 app/src/main/jniLibs/arm64-v8a/libmodel.so
+app/src/main/cpp/llama/
+local.properties

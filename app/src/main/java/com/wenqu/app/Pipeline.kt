@@ -193,15 +193,17 @@ object ChatRepo {
                         )
                         return
                     }
-                    // 开源气象接口秒答；失败绝不拿"XX天气"去搜资讯（会跑题），诚实重试
+                    // 气象接口（Open-Meteo → wttr.in 多源级联）秒答；全部失败也不卡死：
+                    // 把"XX 天气"交给全网搜索+模型总结，答案里带时效提示，绝不再弹"接口没连上"干等
                     val w = runCatching { Weather.tryAnswer(route.q) }.getOrNull()
-                    if (w != null) finishText(msgId, w)
-                    else finishText(
-                        msgId,
-                        "天气服务这会儿没连上（开源气象接口临时无响应），小渠不瞎编天气。\n\n点下面「再试一次」我立刻重连气象接口；或者过几分钟再来问我。",
-                        suggestions = listOf("再试一次")
-                    )
-                    Db.touchConv(currentConvId, gameState = "")
+                    if (w != null) {
+                        Db.touchConv(currentConvId, gameState = "")
+                        finishText(msgId, w)
+                    } else {
+                        Db.touchConv(currentConvId, gameState = "")
+                        val placeGuess = place.ifEmpty { Nlp.extractTopic(route.q).ifEmpty { route.q } }
+                        webFlow(msgId, Intent.Web("$placeGuess 天气 今天 实时", deep = false))
+                    }
                 }
                 is String -> if (route.startsWith("GUESS:")) guessStep(msgId, route.removePrefix("GUESS:").toIntOrNull() ?: 50, conv)
                 is Intent.GameQuit -> {
@@ -220,7 +222,7 @@ object ChatRepo {
                 }
                 is Intent.Math -> mathFlow(msgId, userText, route)
                 is Intent.Image -> imageFlow(msgId, route.q, route.more, route.count)
-                is Intent.Video -> videoFlow(msgId, route.q, route.more, route.count)
+                is Intent.Video -> videoFlow(msgId, route.q, route.more, route.count, route.popular)
                 is Intent.Url -> urlFlow(msgId, route.brand)
                 is Intent.Web -> webFlow(msgId, route)
             }
@@ -279,7 +281,7 @@ object ChatRepo {
             if ((seenHost[h] ?: 0) >= 2) continue
             val src = r.snippet.ifBlank { r.title }
             val sents = Nlp.sentences(src).filter { s ->
-                s.length in 12..160 &&
+                s.length in 12..110 &&
                         !junkRe.containsMatchIn(s) &&
                         // 联想问句碎片："孙悟空三打白骨精吗？"这种又短又带问的
                         !(s.length <= 16 && Regex("[吗呢]").containsMatchIn(s)) &&
@@ -288,10 +290,21 @@ object ChatRepo {
             if (sents.isEmpty()) continue
             val idx = refs.indexOfFirst { it.host == h }.let { if (it >= 0) it else refs.size }
             if (idx == refs.size) refs.add(SourceRef(Nlp.shorten(r.title, 16), r.url, r.engine, h))
-            blocks.add("[${idx + 1}]（${h}）" + sents.take(3).joinToString(""))
+            blocks.add("[${idx + 1}]（${h}）" + sents.take(2).joinToString(""))
             seenHost[h] = (seenHost[h] ?: 0) + 1
         }
-        return blocks.take(8).joinToString("\n\n") to refs
+        // v1.8 关键修复：材料总长硬预算（≈1150字，Qwen 分词后 ≤1200 token）。
+        // 旧版不预算，长摘要会让 prompt 超出模型上下文，native 层静默返回失败 → 全部回退到
+        // 老规则合成 —— 用户看到的"一条条不相关结果"很大程度就是这么来的。
+        var budget = 1150
+        val limited = ArrayList<String>()
+        for (b in blocks) {
+            if (budget <= 0) break
+            val piece = if (b.length > budget) b.take(budget) else b
+            limited.add(piece)
+            budget -= piece.length
+        }
+        return limited.joinToString("\n\n") to refs
     }
 
     private suspend fun webFlow(msgId: Long, intent: Intent.Web) {
@@ -367,9 +380,11 @@ object ChatRepo {
                         "5. 如果材料确实答不了这个问题，用一两句话诚实说明材料里有什么、缺什么。\n" +
                         "只输出回答正文。"
                 val usr = "问题：$q\n\n搜索材料：\n$materials"
+                // 双保险：即便极端情况下材料仍偏长，也在送模型前截断，绝不越上下文
+                val usrSafe = if (usr.length > 1400) usr.take(1400) + "…（材料过长已截断）" else usr
                 val t = runCatching {
                     withTimeout(120_000L) {
-                        Llm.complete(sys, usr, 260, 0.7f) { partial ->
+                        Llm.complete(sys, usrSafe, 320, 0.7f) { partial ->
                             update(msgId) { it.copy(text = partial) }
                         }
                     }
@@ -510,9 +525,13 @@ object ChatRepo {
         return out
     }
 
-    private suspend fun videoFlow(msgId: Long, q: String, more: Boolean, count: Int) {
+    private suspend fun videoFlow(msgId: Long, q: String, more: Boolean, count: Int, popular: Boolean = false) {
         val query = (if (more && videoQ.isNotEmpty()) videoQ else q).ifEmpty { "热门视频" }
         val want = if (count in 1..12) count else 6
+        // popular = 用户没给具体题材，只说"好看的/精彩的/有趣的视频"：
+        // 此时绝不拿"好看"当搜索词（会搜出标题碰巧带"好看"的视频），直接翻 B站热门榜（真·受欢迎）
+        val hotMode = popular || query.isEmpty() ||
+                Regex("^(好看|精彩|有趣|搞笑|热门|经典|优质|高分|耐看|上头|推荐)+$").containsMatchIn(query)
         if (!more || query != videoQ) {
             videoQ = query; videoTurn = 0
             videoSeen.clear(); videoPool = emptyList()
@@ -532,11 +551,22 @@ object ChatRepo {
                 EngineProgress("bili", "哔哩哔哩", 0, 0),
                 EngineProgress("bingvid", "必应视频", 0, 0)
             )
-            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$query」的视频…") }
+            val label = if (hotMode) "全网口碑热门" else query
+            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$label」的视频…") }
 
             coroutineScope {
-                val j1 = async { runCatching { VideoSearcher.fromBilibili(query, page, 10) }.getOrDefault(emptyList()) }
-                val j2 = async { runCatching { VideoSearcher.fromBing(query, 12) }.getOrDefault(emptyList()) }
+                val j1 = async {
+                    runCatching {
+                        if (hotMode) VideoSearcher.fromBilibiliPopular(page, 12)
+                        else VideoSearcher.fromBilibili(query, page, 10)
+                    }.getOrDefault(emptyList())
+                }
+                val j2 = async {
+                    runCatching {
+                        if (hotMode) VideoSearcher.fromBing("热门视频 榜单 高分", 12)
+                        else VideoSearcher.fromBing(query, 12)
+                    }.getOrDefault(emptyList())
+                }
                 val l1 = j1.await(); val l2 = j2.await()
                 setVidState(msgId, states, "bili", l1.size)
                 setVidState(msgId, states, "bingvid", l2.size)
@@ -549,7 +579,7 @@ object ChatRepo {
         if (show.isEmpty()) {
             finishText(msgId, Synth.videoFail(query), suggestions = listOf("再试一次", "换个关键词找视频"), query = query)
         } else {
-            finishText(msgId, Synth.videoIntro(query, show.size), videos = show, query = query)
+            finishText(msgId, Synth.videoIntro(if (hotMode) "热门好片" else query, show.size), videos = show, query = query)
             Db.touchConv(currentConvId, lastQuery = query)
         }
     }
