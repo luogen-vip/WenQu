@@ -22,7 +22,7 @@
 ## 构建
 
 ```bash
-./gradlew assembleRelease
+gradle assembleRelease
 # 产物：app/build/outputs/apk/release/app-release.apk
 ```
 
