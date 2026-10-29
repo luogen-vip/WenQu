@@ -1,0 +1,72 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Cache keystore
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/keystore
+          key: wenqu-keystore-v1
+
+      - name: Prepare signing keystore
+        env:
+          WENQU_KEYSTORE: /home/runner/keystore/wenqu.jks
+        run: |
+          mkdir -p "$(dirname "$WENQU_KEYSTORE")"
+          if [ ! -f "$WENQU_KEYSTORE" ]; then
+            keytool -genkeypair -v -keystore "$WENQU_KEYSTORE" -alias wenqu \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -storepass wenqu2026 -keypass wenqu2026 \
+              -dname "CN=WenQu, OU=WenQu, O=WenQu, L=Beijing, C=CN"
+          fi
+
+      - name: Ensure Android SDK components
+        run: |
+          SDKM=$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager
+          (ls "$ANDROID_HOME/platforms" 2>/dev/null | grep -q "android-35") || yes | $SDKM "platforms;android-35" >/dev/null
+          (ls "$ANDROID_HOME/build-tools" 2>/dev/null | grep -q "35.0.0") || yes | $SDKM "build-tools;35.0.0" >/dev/null
+
+      - name: Build release APK
+        env:
+          WENQU_KEYSTORE: /home/runner/keystore/wenqu.jks
+          WENQU_KEYSTORE_PASS: wenqu2026
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WenQu-APK
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.${{ github.run_number }}
+          name: 问渠 v1.${{ github.run_number }}
+          body: "问渠 · 全网聚合 AI 搜索助手 正式签名 APK"
+          files: app/build/outputs/apk/release/app-release.apk
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
