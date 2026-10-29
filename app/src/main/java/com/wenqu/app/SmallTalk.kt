@@ -100,10 +100,24 @@ object SmallTalk {
 
     fun match(raw: String): String? {
         val q = raw.trim()
+        val ql = q.lowercase()
         for (r in rules) {
             if (r.re.matches(q)) {
                 val reply = pick(r.replies)
                 return reply
+            }
+        }
+        // 组合寒暄（如「你好啊，在干嘛？」）：有问候/寒暄词、无任何搜索意图 → 像人一样回应，绝不去搜资讯
+        if (q.length <= 16) {
+            val greeting = Regex("^(你好|您好|哈喽|哈罗|嗨|嘿|哟|hi|hello|hey|早啊|早上好|中午好|下午好|晚上好)").containsMatchIn(ql)
+            val chatty = Regex("(在干嘛|在干吗|在干啥|在忙什么|忙啥|干嘛呢|吃饭了吗|吃了吗|睡了没|怎么样啊|最近好吗|还好吗)").containsMatchIn(q)
+            val hasIntent = Regex("查|搜|找|是什么|什么叫|怎么|多少|为什么|新闻|天气|图片|照片|视频|几月|几号|几点|官网|网址|计算|等于").containsMatchIn(ql)
+            if ((greeting || chatty) && !hasIntent) {
+                return pick(listOf(
+                    "好得很，就等着你出题呢！想查点什么？天南海北、图片视频、时间天气，随便点。",
+                    "在呢在呢，全网雷达一直开着。你先说——是想查资料，还是找点图/视频乐一乐？",
+                    "聊可以，不过小渠的看家本事还是查东西。丢个问题过来，让我露一手？"
+                ))
             }
         }
         // 轻量情绪兜底：特别短又没有信息量的输入

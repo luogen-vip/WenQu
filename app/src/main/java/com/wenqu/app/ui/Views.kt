@@ -361,37 +361,48 @@ private fun AiBubble(
             }
         }
         if (!m.searching && !m.streaming && m.text.isNotEmpty()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(0.dp),
+                verticalArrangement = Arrangement.spacedBy((-4).dp)
+            ) {
                 ActionBtn(Icons.Default.Refresh, "重新回答") { onReanswer(m.id) }
                 if (m.query.isNotEmpty()) {
                     ActionBtn(Icons.Default.Search, "再查查") { onSend("再查查") }
                     ActionBtn(Icons.Default.Image, "找图片") { onSend("找${m.query}相关图片") }
                 }
-                IconButton(onClick = { onSpeakToggle(m.text) }, modifier = Modifier.size(30.dp)) {
-                    Icon(
-                        if (speaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                        if (speaking) "停止朗读" else "朗读",
-                        modifier = Modifier.size(16.dp),
-                        tint = if (speaking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = { copyText(ctx, m.text) }, modifier = Modifier.size(30.dp)) {
-                    Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                // 单条消息语音开关：播放中显示"停止朗读"，再点即停
+                ActionBtn(
+                    if (speaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    if (speaking) "停止朗读" else "朗读",
+                    highlight = speaking
+                ) { onSpeakToggle(m.text) }
+                ActionBtn(Icons.Default.ContentCopy, "复制") { copyText(ctx, m.text) }
+                ActionBtn(Icons.Default.Delete, "删除") { onDelete(m.id) }
             }
         }
     }
 }
 
 @Composable
-private fun ActionBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+private fun ActionBtn(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    highlight: Boolean = false,
+    onClick: () -> Unit
+) {
     TextButton(
         onClick = onClick,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 7.dp, vertical = 0.dp)
     ) {
-        Icon(icon, null, modifier = Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(
+            icon, null, modifier = Modifier.size(13.dp),
+            tint = if (highlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Spacer(Modifier.size(3.dp))
-        Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            label, fontSize = 12.sp,
+            color = if (highlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

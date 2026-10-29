@@ -44,9 +44,13 @@ object IntentRouter {
             return Intent.Recall
         }
 
-        // 6) 重新回答
-        if (q.length <= 14 && Regex("重新回答|再(回答|答)(一)?次|换个答案|换个说法|再说说|再讲讲").containsMatchIn(ql)) {
-            return Intent.Web(lastQuery.ifEmpty { "最近热点新闻" }, reanswer = true)
+        // 6) 重新回答 / 再试一次（若是天气/时间问题则重走秒答，而不是搜索）
+        if (q.length <= 14 && Regex("重新回答|再(回答|答)(一)?次|再试一次|再搜一次|再试|换个答案|换个说法|再说说|再讲讲").containsMatchIn(ql)) {
+            return when {
+                Weather.looksLike(lastQuery) -> Intent.WeatherQ(lastQuery)
+                TimeAnswer.route(lastQuery) != null -> Intent.Time(lastQuery)
+                else -> Intent.Web(lastQuery.ifEmpty { "最近热点新闻" }, reanswer = true)
+            }
         }
 
         // 7) 核查/深挖（针对上一个答案的主题，而不是把"再查查"当关键词）

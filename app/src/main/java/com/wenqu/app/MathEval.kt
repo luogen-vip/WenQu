@@ -7,15 +7,29 @@ object MathEval {
 
     fun tryEval(input: String): Pair<String, String>? {
         var s = input.trim()
-        if (!s.any { it.isDigit() }) return null
+        if (!s.any { it.isDigit() } && !Regex("[一二两三四五六七八九十]").containsMatchIn(s)) return null
+        // 中文口语运算符/数字归一化
         s = s.replace("×", "*").replace("x", "*").replace("X", "*")
-            .replace("÷", "/").replace("＋", "+").replace("－", "-").replace(" ", "")
-        if (!Regex("^[0-9+\\-*/^().%√]+$").matches(s)) return null
-        // 必须含二元运算
-        if (!Regex("[0-9)]\\s*[+*/^%]").containsMatchIn(s) && !Regex("[0-9)]\\s*-[0-9(]").containsMatchIn(s)) return null
+            .replace("÷", "/").replace("＋", "+").replace("－", "-")
+            .replace("乘以", "*").replace("乘", "*")
+            .replace("除以", "/").replace("除", "/")
+            .replace("加", "+").replace("减", "-")
+            .replace(" ", "")
+        s = Regex("[一二两三四五六七八九十零]+").replace(s) { m -> Nlp.chineseNum(m.value).toString() }
+        // 从句子中抠出最长算式片段（支持「1+1等于多少」「算一下128*64+256」）
+        val seg = Regex("[0-9+\\-*/^().%√]+").findAll(s)
+            .filter { m ->
+                m.value.length >= 3 && m.value.any { "+-*/^%√".contains(it) } &&
+                        // 防止日期/年龄被误算：片段紧贴“年/月/日/号/岁”时跳过
+                        !(m.range.first > 0 && s[m.range.first - 1] in "年月日号岁") &&
+                        !(m.range.last + 1 < s.length && s[m.range.last + 1] in "年月日号岁")
+            }
+            .maxByOrNull { it.value.length } ?: return null
+        val expr = seg.value.trim('.', '，', ',')
+        if (!Regex("[0-9)]\\s*[+*/^%]").containsMatchIn(expr) && !Regex("[0-9)]\\s*-[0-9(]").containsMatchIn(expr)) return null
         return try {
-            val v = Parser(s).parse()
-            if (v.isNaN() || v.isInfinite()) null else s to fmt(v)
+            val v = Parser(expr).parse()
+            if (v.isNaN() || v.isInfinite()) null else expr to fmt(v)
         } catch (e: Exception) { null }
     }
 

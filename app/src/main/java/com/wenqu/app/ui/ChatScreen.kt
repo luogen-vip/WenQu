@@ -79,14 +79,26 @@ import com.wenqu.app.MediaResult
 import kotlinx.coroutines.launch
 
 private val sampleQuestions = listOf(
-    "云南保山今天的天气怎么样",
+    "今天天气怎么样",
     "现在纽约几点",
-    "郑恺是谁",
+    "孙悟空是谁",
     "B站的官网是多少",
     "来几张柴犬壁纸",
     "找个关于火星探测的视频",
     "128*64+256 等于多少",
     "最近有什么大新闻"
+)
+
+/** 输入框提示语：多样化、不固定地名，4 秒轮换 */
+private val inputHints = listOf(
+    "你可以问我：今天的天气怎么样",
+    "你可以问我：现在纽约几点",
+    "你可以问我：随便哪位名人是谁",
+    "你可以让我：找几张好看的壁纸",
+    "你可以问我：128*64+256 等于多少",
+    "你可以让我：找几个视频看看",
+    "你可以问我：某个网站的官网是多少",
+    "你可以问我：最近有什么大新闻"
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -105,6 +117,13 @@ fun ChatScreen(
     var viewImage by remember { mutableStateOf<MediaResult?>(null) }
     var about by remember { mutableStateOf(false) }
     var engineDetail by remember { mutableStateOf<EngineProgress?>(null) }
+    var hintIdx by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(4000)
+            hintIdx = (hintIdx + 1) % inputHints.size
+        }
+    }
 
     // 抽屉打开时，系统返回键 = 关闭抽屉（而不是退出应用）
     BackHandler(enabled = drawerState.isOpen) {
@@ -242,7 +261,7 @@ fun ChatScreen(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
                 )
             },
-            bottomBar = { InputBar { ChatRepo.send(it) } }
+            bottomBar = { InputBar(inputHints[hintIdx % inputHints.size]) { ChatRepo.send(it) } }
         ) { pad ->
             Box(Modifier.padding(pad).fillMaxSize()) {
                 if (msgs.isEmpty()) {
@@ -352,7 +371,7 @@ private fun EmptyState(onPick: (String) -> Unit) {
 }
 
 @Composable
-private fun InputBar(onSend: (String) -> Unit) {
+private fun InputBar(hint: String, onSend: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
     fun submit() {
         val t = text.trim()
@@ -370,7 +389,7 @@ private fun InputBar(onSend: (String) -> Unit) {
                     value = text,
                     onValueChange = { text = it },
                     modifier = Modifier.weight(1f).heightIn(min = 52.dp, max = 120.dp),
-                    placeholder = { Text("问点什么，比如：保山今天的天气", fontSize = 13.sp) },
+                    placeholder = { Text(hint, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     shape = RoundedCornerShape(24.dp),
                     maxLines = 4,
                     textStyle = TextStyle(fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface),

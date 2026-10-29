@@ -185,17 +185,31 @@ object VideoSearcher {
             for (a in doc.select("a.mc_vtvc_link")) {
                 if (out.size >= count) break
                 val u = Nlp.unwrapRedirect(a.absUrl("href"))
-                if (!u.startsWith("http")) continue
-                val title = (a.attr("aria-label").ifEmpty { a.selectFirst(".mc_vtvc_title")?.text() ?: u }).trim()
+                if (!u.startsWith("http") || u.contains("bing.com/videos")) continue
+                val rawTitle = a.attr("aria-label").ifEmpty { a.selectFirst(".mc_vtvc_title")?.text() ?: "" }
+                val title = cleanVideoTitle(rawTitle)
+                // 标题清洗后过短或仍像链接碎片 → 丢弃，宁缺毋滥
+                if (title.length < 4 || title.startsWith("?") || title.contains("uid=")) continue
                 val meta = a.selectFirst(".mc_vtvc_meta_block, .mc_vtvc_meta")?.text()?.take(60) ?: ""
-                // 抓封面缩略图（必应视频卡内的 img）
-                val img = a.selectFirst("img")?.let { im ->
-                    val src = im.attr("src").ifEmpty { im.attr("data-src") }
-                    if (src.startsWith("http")) src else ""
+                // 封面：必应视频卡内 img，多属性尝试（src/data-src/data-thumb）
+                val img = a.selectFirst(".mc_vtvc_th img, img")?.let { im ->
+                    listOf(im.attr("src"), im.attr("data-src"), im.attr("data-thumb"))
+                        .firstOrNull { it.startsWith("http") } ?: ""
                 } ?: ""
-                if (title.isNotEmpty()) out.add(MediaResult(title.take(60), img, u, "必应视频", meta))
+                out.add(MediaResult(title.take(60), img, u, "必应视频", meta))
             }
         } catch (_: Exception) {}
         out
+    }
+
+    /** 视频标题清洗：去链接碎片、乱码前缀 */
+    private fun cleanVideoTitle(t: String): String {
+        var s = t
+            .replace(Regex("https?://\\S+"), "")
+            .replace(Regex("[?？]+uid=\\S*"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        s = s.trim('?', '？', ' ', '|', '/', '-', '_', '·')
+        return s
     }
 }

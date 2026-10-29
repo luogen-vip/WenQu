@@ -164,10 +164,14 @@ object ChatRepo {
                     else webFlow(msgId, Intent.Web(Nlp.stripPolite(route.q).ifEmpty { route.q }))
                 }
                 is Intent.WeatherQ -> {
-                    // 开源气象接口秒答；失败才回落搜索
+                    // 开源气象接口秒答；失败绝不拿"XX天气"去搜资讯（会跑题），诚实重试
                     val w = runCatching { Weather.tryAnswer(route.q) }.getOrNull()
                     if (w != null) finishText(msgId, w)
-                    else webFlow(msgId, Intent.Web(route.q))
+                    else finishText(
+                        msgId,
+                        "天气服务这会儿没连上（开源气象接口临时无响应），小渠不瞎编天气。\n\n点下面「再试一次」我立刻重连气象接口；或者过几分钟再来问我。",
+                        suggestions = listOf("再试一次")
+                    )
                 }
                 is String -> if (route.startsWith("GUESS:")) guessStep(msgId, route.removePrefix("GUESS:").toIntOrNull() ?: 50, conv)
                 is Intent.GameQuit -> {

@@ -47,19 +47,40 @@ object Weather {
             place = place.replace(w, "")
         }
         place = place.trim().trimEnd('。', '.', '？', '?', '，', ',')
-        if (place.isEmpty() || place.length > 14) return@withContext null
+        if (place.isEmpty() || place.length > 16) return@withContext null
 
-        // 地理编码改用 Open-Meteo 自带服务（与气象接口同域，国内可达性一致）
-        val geo = Http.get(
-            "https://geocoding-api.open-meteo.com/v1/search?name=${Nlp.enc(place)}&count=1&language=zh&format=json"
-        ) ?: return@withContext null
-        val arr = try { JSONArray(geo) } catch (e: Exception) { return@withContext null }
-        if (arr.length() == 0) return@withContext null
-        val g = arr.getJSONObject(0)
-        val lat = g.optString("latitude")
-        val lon = g.optString("longitude")
-        val admin1 = g.optString("admin1")
-        val display = g.optString("name") + if (admin1.isEmpty() || admin1 == g.optString("name")) "" else "（$admin1）"
+        // 地名多级降级尝试：「云南省保山市隆阳区」→ 全名 → 去行政后缀 → 末级 → 上级市/省
+        val candidates = buildList {
+            add(place)
+            val stripped = place.replace("自治州", "").replace("自治区", "").replace("省", "").replace("市", "").replace("区", "").replace("县", "")
+            if (stripped.length >= 2 && stripped != place) add(stripped)
+            if (place.contains("市")) add(place.substringAfterLast("市").ifEmpty { place.substringBeforeLast("市") })
+            if (place.contains("省")) add(place.substringAfterLast("省"))
+            if (place.length >= 3) add(place.take(3))
+            if (place.length >= 2) add(place.take(2))
+        }.map { it.trim() }.filter { it.length in 2..16 }.distinct()
+
+        // 地理编码用 Open-Meteo 自带服务（与气象接口同域，国内可达性一致）；逐个候选尝试直到命中
+        var lat = ""
+        var lon = ""
+        var display = ""
+        for (cand in candidates) {
+            val geo = Http.get(
+                "https://geocoding-api.open-meteo.com/v1/search?name=${Nlp.enc(cand)}&count=1&language=zh&format=json",
+                callTimeoutSec = 9
+            ) ?: continue
+            val arr = try { JSONArray(geo) } catch (e: Exception) { continue }
+            if (arr.length() == 0) continue
+            val g = arr.getJSONObject(0)
+            val la = g.optString("latitude")
+            val lo = g.optString("longitude")
+            if (la.isEmpty() || lo.isEmpty()) continue
+            lat = la; lon = lo
+            val admin1 = g.optString("admin1")
+            display = g.optString("name") + if (admin1.isEmpty() || admin1 == g.optString("name")) "" else "（$admin1）"
+            break
+        }
+        if (lat.isEmpty() || lon.isEmpty()) return@withContext null
 
         val w = Http.get(
             "https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon" +

@@ -52,7 +52,13 @@ class Aggregator(private val onUpdate: (EngineProgress) -> Unit) {
     }
 
     companion object {
-        /** 去重（URL）+ 相关度排序（标题/摘要命中率 + 多引擎命中同域加分 + 引擎可靠性） */
+        /** 权威百科域名：定义类回答优先采信 */
+        private val WIKI_HOSTS = listOf(
+            "baike.baidu", "baike.sogou", "baike.so.com", "baike.com",
+            "wikipedia.org", "zh.wikipedia", "m.baike", "wiki.mbalib"
+        )
+
+        /** 去重（URL）+ 相关度排序（标题/摘要命中率 + 百科加权 + 多引擎命中同域加分 + 引擎可靠性） */
         fun rank(q: String, rs: List<WebResult>): List<WebResult> {
             val toks = Nlp.tokens(q)
             val seen = HashSet<String>()
@@ -68,6 +74,7 @@ class Aggregator(private val onUpdate: (EngineProgress) -> Unit) {
             for (r in dedup) {
                 var s = Nlp.coverage(toks, r.title) * 3.0 + Nlp.coverage(toks, r.snippet) * 1.3
                 val h = Nlp.hostOf(r.url)
+                if (WIKI_HOSTS.any { h.contains(it) }) s += 1.4
                 if ((hostCount[h] ?: 0) >= 2) s += 1.2
                 s += 0.15
                 r.score = s

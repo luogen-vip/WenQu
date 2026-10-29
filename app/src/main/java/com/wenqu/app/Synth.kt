@@ -145,11 +145,12 @@ object Synth {
         }
     }
 
-    /** 官网/链接类问题：突出显示链接 */
+    /** 官网/链接类问题：突出显示链接（品牌域名匹配，防止"钛媒体讲B站"抢排名） */
     fun urlAnswer(brand: String, ranked: List<WebResult>): Out {
         val exclude = listOf("baidu.com", "bing.com", "sogou.com", "so.com", "toutiao.com",
-            "sm.cn", "zhihu.com", "csdn.net", "bilibili.com", "weibo.com", "tieba.baidu", "wenku.baidu", "zhidao.baidu",
-            "baike.baidu", "360.cn", "qihoo.com")
+            "sm.cn", "zhihu.com", "csdn.net", "bilibili.com/video", "weibo.com", "tieba.baidu", "wenku.baidu", "zhidao.baidu",
+            "baike.baidu", "360.cn", "qihoo.com", "tmtpost", "36kr", "ifeng.com", "sohu.com", "163.com/news", "thepaper.cn")
+        val alias = brandAlias(brand)
         val cands = ranked.filter { r ->
             val h = Nlp.hostOf(r.url)
             h.isNotEmpty() && exclude.none { h.contains(it) || r.url.contains(it) }
@@ -157,7 +158,13 @@ object Synth {
         if (cands.isEmpty()) {
             return compose(brand, ranked, emptyList(), false, false)
         }
-        val best = cands.first()
+        // 品牌/别名命中（域名或标题）的排最前，优先选域名命中
+        val best = cands.sortedByDescending { r ->
+            val h = Nlp.hostOf(r.url)
+            val hostHit = alias.any { h.contains(it) }
+            val titleHit = alias.any { r.title.lowercase().contains(it) }
+            when { hostHit -> 3; titleHit -> 2; else -> 0 }
+        }.first()
         val refs = cands.take(5).map { SourceRef(Nlp.shorten(it.title, 16), it.url, it.engine, Nlp.hostOf(it.url)) }
         val text = buildString {
             append("帮你核对了 ${cands.size} 个独立来源，「${brand}」的网址是这个：\n\n")
@@ -167,6 +174,33 @@ object Synth {
             append("还需要我查查它家的其他信息吗？比如「${brand} 是什么公司」。")
         }
         return Out(text.trim(), refs, emptyList())
+    }
+
+    /** 常见品牌别名映射（用于官网域名匹配） */
+    private fun brandAlias(brand: String): List<String> {
+        val b = brand.lowercase()
+        return when {
+            b.contains("b站") || b.contains("哔哩") || b.contains("bili") -> listOf("bilibili")
+            b.contains("油管") || b.contains("youtube") -> listOf("youtube")
+            b.contains("知乎") -> listOf("zhihu")
+            b.contains("淘宝") -> listOf("taobao")
+            b.contains("天猫") -> listOf("tmall")
+            b.contains("京东") -> listOf("jd.com")
+            b.contains("拼多多") -> listOf("pinduoduo", "yangkeduo")
+            b.contains("微信") -> listOf("weixin", "wechat")
+            b.contains("qq") -> listOf("qq.com")
+            b.contains("腾讯") -> listOf("qq.com", "tencent")
+            b.contains("抖音") -> listOf("douyin")
+            b.contains("微博") -> listOf("weibo")
+            b.contains("百度") -> listOf("baidu.com")
+            b.contains("网易") -> listOf("163.com", "netease")
+            b.contains("支付宝") || b.contains("阿里") -> listOf("alipay", "alibaba", "aliyun")
+            b.contains("美团") -> listOf("meituan")
+            b.contains("滴滴") -> listOf("didiglobal", "didichuxing")
+            b.contains("小米") -> listOf("mi.com", "xiaomi")
+            b.contains("华为") -> listOf("huawei", "vmall")
+            else -> emptyList()
+        }
     }
 
     fun imageIntro(q: String, count: Int, want: Int): String {
