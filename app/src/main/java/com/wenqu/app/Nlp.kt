@@ -8,7 +8,7 @@ import java.net.URLEncoder
 object Nlp {
 
     val urlRegex: Regex =
-        Regex("""https?://[^\s，。、！？；：（）()【】《》\[\]"""''<>«»…]+""")
+        Regex("https?://[^\\s，。、！？；：（）()【】《》\\[\\]“”‘’\"'<>«»…]+")
 
     private val cjkRegex = Regex("[\\u4e00-\\u9fff]+")
     private val latinRegex = Regex("[A-Za-z0-9]+")

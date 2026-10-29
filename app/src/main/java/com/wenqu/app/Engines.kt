@@ -24,7 +24,7 @@ abstract class Engine(val id: String, val name: String, val experimental: Boolea
     open fun isPost(): Boolean = false
     open fun postBody(q: String): String = ""
 
-    suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
+    open suspend fun search(q: String, n: Int, deep: Boolean): List<WebResult> = withContext(Dispatchers.IO) {
         var out = emptyList<WebResult>()
         repeat(2) { attempt ->
             if (out.isNotEmpty()) return@repeat

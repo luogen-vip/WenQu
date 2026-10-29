@@ -104,7 +104,7 @@ object SmallTalk {
         }
         // 轻量情绪兜底：特别短又没有信息量的输入
         if (q.length <= 3 && Regex("^[\\u4e00-\\u9fff～~。.!?！？\\s]+$").matches(q) &&
-            !Regex("查|搜|是什么|吗|怎么|多少|几").contains(q)
+            !Regex("查|搜|是什么|吗|怎么|多少|几").containsMatchIn(q)
         ) {
             return pick(listOf(
                 "嗯？想聊点什么，还是有问题要我查？说具体点我就能开工。",

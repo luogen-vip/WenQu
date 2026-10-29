@@ -351,6 +351,7 @@ private fun ChatRepoClear() {
     com.wenqu.app.ChatRepo.clearAll()
 }
 
+@Composable
 private fun SettingCard(title: String, content: @Composable () -> Unit) {
     Surface(
         shape = RoundedCornerShape(16.dp),

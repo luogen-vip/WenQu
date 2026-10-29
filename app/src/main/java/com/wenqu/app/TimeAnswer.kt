@@ -77,7 +77,7 @@ object TimeAnswer {
         val zh = zoneId ?: ZoneId.systemDefault()
         val t = ZonedDateTime.now(zh)
         val local = LocalDateTime.now()
-        val diffH = Duration.between(ZonedDateTime.now(local.zone), t).toHours()
+        val diffH = Duration.between(ZonedDateTime.now(ZoneId.systemDefault()), t).toHours()
 
         val dateStr = t.format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
         val timeStr = t.format(DateTimeFormatter.ofPattern("HH:mm:ss"))

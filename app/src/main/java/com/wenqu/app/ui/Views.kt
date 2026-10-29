@@ -253,7 +253,8 @@ private fun AiBubble(
                     } else {
                         if (m.text.isNotEmpty()) {
                             LinkText(m.text, fontSize = 15.sp, onOpenLink = onOpenLink)
-                        }                        if (m.streaming) BlinkCursor()
+                        }
+                        if (m.streaming) BlinkCursor()
                         if (m.images.isNotEmpty()) ImageRow(m.images, onImageTap, onOpenLink)
                         if (m.videos.isNotEmpty()) VideoList(m.videos, onOpenLink)
                         if (m.sources.isNotEmpty()) SourceChips(m.sources, onOpenLink)
@@ -296,14 +297,14 @@ private fun AiBubble(
 
 @Composable
 fun BlinkCursor() {
-    val alpha = androidx.compose.runtime.rememberInfiniteTransition(label = "cursor")
-        .animateFloat(
-            initialValue = 0.15f, targetValue = 0.9f,
-            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                androidx.compose.animation.core.tween(500),
-                androidx.compose.animation.core.RepeatMode.Reverse
-            ), label = "cursorAlpha"
-        ).value
+    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "cursor")
+    val alpha by transition.animateFloat(
+        initialValue = 0.15f, targetValue = 0.9f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(500),
+            androidx.compose.animation.core.RepeatMode.Reverse
+        ), label = "cursorAlpha"
+    )
     Text("▍", color = MaterialTheme.colorScheme.primary.copy(alpha = alpha), fontSize = 15.sp)
 }
 
