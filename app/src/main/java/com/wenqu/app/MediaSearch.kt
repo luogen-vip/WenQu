@@ -9,7 +9,15 @@ import org.jsoup.Jsoup
  * 全网图片/视频搜索（全部为国内直连可用源）。
  * 图片四路：必应图片 + 百度图片 + 搜狗图片 + 360图片；视频两路：B站开放接口 + 必应视频。
  * 每路可独立调用（供 UI 显示实时进度），search() 负责交错合并。
+ * 所有源统一过滤推广/广告图（标题命中推广词直接丢弃）。
  */
+object MediaFilter {
+    /** 推广/广告词：标题命中即丢（典型案例：搜"美女"出"安装之星奖牌"） */
+    val AD_WORDS = Regex("(安装|协会|之星|奖牌|奖章|有限公司|股份有限|集团有限|官网|招聘|求职|供应商|供应|批发|经销|代理加盟|价格|报价|厂家|厂商|采购|优惠券|领券|秒杀|促销|拼团|加盟|招商|典当|回收|贷款|保险|房产|中介|培训学校|补习班)")
+
+    fun isAd(title: String): Boolean = AD_WORDS.containsMatchIn(title)
+}
+
 object ImageSearcher {
 
     suspend fun search(q: String, offset: Int, count: Int = 15): List<MediaResult> {
@@ -54,8 +62,9 @@ object ImageSearcher {
                     val o = JSONObject(m)
                     val big = o.optString("murl")
                     val thumb = o.optString("turl").ifEmpty { big }
-                    val title = o.optString("t").ifEmpty { q }
-                    if (big.startsWith("http")) out.add(MediaResult(title, thumb, big, "必应图片"))
+                    val title = o.optString("t")
+                    if (big.startsWith("http") && title.isNotEmpty() && !MediaFilter.isAd(title))
+                        out.add(MediaResult(title, thumb, big, "必应图片"))
                 } catch (_: Exception) {}
             }
         } catch (_: Exception) {}
@@ -79,9 +88,10 @@ object ImageSearcher {
                 val item = data.optJSONObject(i) ?: continue
                 val big = item.optString("middleURL").ifEmpty { item.optString("thumbURL") }
                 val thumb = item.optString("thumbURL").ifEmpty { big }
-                val title = item.optString("fromPageTitleEnc").ifEmpty { q }
+                val title = item.optString("fromPageTitleEnc")
                 val page = item.optString("fromURL")
-                if (big.startsWith("http")) out.add(MediaResult(title, thumb, page, "百度图片"))
+                if (big.startsWith("http") && title.isNotEmpty() && !MediaFilter.isAd(title))
+                    out.add(MediaResult(title, thumb, page, "百度图片"))
             }
         } catch (_: Exception) {}
         out
@@ -101,10 +111,11 @@ object ImageSearcher {
                 val item = items.optJSONObject(i) ?: continue
                 val big = item.optString("picUrl").ifEmpty { item.optString("originUrl") }
                 val thumb = item.optString("thumbUrl").ifEmpty { big }
-                val title = item.optString("title").ifEmpty { q }
+                val title = item.optString("title")
                 val page = item.optJSONObject("link")?.optString("url")
                     ?: item.optString("pcUrl").ifEmpty { item.optString("url") }
-                if (big.startsWith("http")) out.add(MediaResult(title, thumb, page, "搜狗图片"))
+                if (big.startsWith("http") && title.isNotEmpty() && !MediaFilter.isAd(title))
+                    out.add(MediaResult(title, thumb, page, "搜狗图片"))
             }
         } catch (_: Exception) {}
         out
@@ -123,9 +134,10 @@ object ImageSearcher {
                 val item = arr.optJSONObject(i) ?: continue
                 val big = item.optString("img").ifEmpty { item.optString("img128") }
                 val thumb = item.optString("thumb").ifEmpty { big }
-                val title = item.optString("title").ifEmpty { q }
+                val title = item.optString("title")
                 val page = item.optString("link")
-                if (big.startsWith("http")) out.add(MediaResult(title, thumb, page, "360图片"))
+                if (big.startsWith("http") && title.isNotEmpty() && !MediaFilter.isAd(title))
+                    out.add(MediaResult(title, thumb, page, "360图片"))
             }
         } catch (_: Exception) {}
         out
@@ -169,8 +181,8 @@ object VideoSearcher {
                 val author = o.optString("author")
                 val duration = o.optString("duration")
                 val pic = o.optString("pic").replace("http://", "https://")
-                // m 站链接在内置 WebView 里兼容性最好，可直接网页播放
-                out.add(MediaResult(title, pic, "https://m.bilibili.com/video/$bvid", "哔哩哔哩", "$author · $duration"))
+                // 桌面版网页在 WebView 里最稳（m 站会跳拉起 APP/登录导致"网页无法打开"）
+                out.add(MediaResult(title, pic, "https://www.bilibili.com/video/$bvid", "哔哩哔哩", "$author · $duration"))
             }
         } catch (_: Exception) {}
         out

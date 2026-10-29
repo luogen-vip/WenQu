@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -32,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
@@ -104,6 +106,7 @@ private val inputHints = listOf(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
+    listState: LazyListState,
     onOpenQuick: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenLink: (String) -> Unit
@@ -113,7 +116,6 @@ fun ChatScreen(
     val speaking by ChatRepo.voice.speaking.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
     var viewImage by remember { mutableStateOf<MediaResult?>(null) }
     var about by remember { mutableStateOf(false) }
     var engineDetail by remember { mutableStateOf<EngineProgress?>(null) }
@@ -130,17 +132,21 @@ fun ChatScreen(
         scope.launch { drawerState.close() }
     }
 
-    // 自动滚动：新消息到达贴底；流式增长时若用户仍贴底则继续跟随
+    // 滚动策略：只在"用户本来贴着底部"时才自动跟随（新消息/流式增长）；
+    // 用户在上方翻历史时绝不打扰；listState 由外部持有，进出二级页面/点开网页再返回位置不丢。
+    val atBottom by remember {
+        androidx.compose.runtime.derivedStateOf {
+            val inf = listState.layoutInfo
+            inf.visibleItemsInfo.isEmpty() ||
+                    (inf.visibleItemsInfo.lastOrNull()?.index ?: 0) >= inf.totalItemsCount - 2
+        }
+    }
     LaunchedEffect(msgs.size) {
-        if (msgs.isNotEmpty()) listState.animateScrollToItem(msgs.size - 1)
+        if (msgs.isNotEmpty() && atBottom) listState.scrollToItem(msgs.size - 1)
     }
     val lastLen = msgs.lastOrNull()?.text?.length ?: 0
     LaunchedEffect(lastLen) {
-        if (msgs.isNotEmpty()) {
-            val info = listState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            if (lastVisible >= info.totalItemsCount - 2) listState.animateScrollToItem(msgs.size - 1)
-        }
+        if (msgs.isNotEmpty() && atBottom) listState.scrollToItem(msgs.size - 1)
     }
 
     ModalNavigationDrawer(
@@ -287,6 +293,27 @@ fun ChatScreen(
                             )
                         }
                     }
+                    // 不在底部时显示“回到底部”悬浮箭头，一点到底
+                    if (!atBottom) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                            shadowElevation = 4.dp,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 16.dp, bottom = 18.dp)
+                                .size(42.dp)
+                                .clickable { scope.launch { listState.animateScrollToItem(msgs.size - 1) } }
+                        ) {
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                Icon(
+                                    Icons.Default.ArrowDownward, "回到底部",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -305,15 +332,16 @@ fun ChatScreen(
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
-                        "问渠 WenQu v1.1\n作者：罗根\n\n" +
-                                "完全开源的全网聚合搜索问答助手：\n\n" +
+                        "问渠 WenQu v1.3\n作者：罗根\n\n" +
+                                "完全开源的全网聚合搜索问答助手，内置本地大模型：\n\n" +
+                                "· 内置本地大模型（Qwen2.5，随 APK 离线携带）：搜索完成后由它阅读材料、理解问题，实时总结成直接回答，不走固定模板\n" +
                                 "· 必应/必应中国/百度/搜狗/360/神马/头条 多路引擎并行抓取，谁抽风换谁上\n" +
-                                "· 图片四路、视频两路全网匹配\n" +
-                                "· 天气/时间/计算本地秒答，精准不出错\n" +
+                                "· 图片多主体同时找（“孙悟空和熊出没”两张都找）、过滤推广图\n" +
+                                "· 天气/时间/计算本地秒答，没说地点会反问你\n" +
                                 "· 上下文记忆持久保存，重启不丢\n" +
                                 "· 语音朗读、流式输出、来源可溯源\n\n" +
                                 "本应用 100% 开源（MIT License），不含闭源组件与追踪 SDK。\n" +
-                                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines，均遵循其各自开源协议。",
+                                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines、llama.cpp、Qwen2.5（Apache-2.0），均遵循其各自开源协议。",
                         fontSize = 13.sp, lineHeight = 20.sp
                     )
                 }
@@ -341,10 +369,11 @@ private fun EmptyState(onPick: (String) -> Unit) {
         Text("你好，我是小渠", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "多路搜索引擎 + 实时联网\n把全网的答案整理成一句人话给你\n问时间、问天气，秒答不用搜",
+            "内置本地大模型 + 多路实时联网\n把全网的答案读懂后总结成一句话给你\n问时间、问天气，秒答不用搜",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            lineHeight = 20.sp
+            lineHeight = 20.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
         Spacer(Modifier.height(22.dp))
         FlowRow(

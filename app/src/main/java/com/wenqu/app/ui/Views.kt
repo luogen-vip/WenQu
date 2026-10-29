@@ -514,7 +514,11 @@ private fun ImageRow(images: List<MediaResult>, onImageTap: (MediaResult, List<M
                             modifier = Modifier.size(width = 132.dp, height = 108.dp)
                         )
                         Text(
-                            "${img.source} · ${img.title.take(12)}",
+                            buildString {
+                                if (img.extra.isNotEmpty()) { append(img.extra); append(" · ") }
+                                append(img.source)
+                                if (img.title.isNotEmpty()) { append(" · "); append(img.title.take(10)) }
+                            },
                             fontSize = 9.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,

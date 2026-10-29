@@ -14,8 +14,34 @@ android {
         applicationId = "com.wenqu.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf(
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DANDROID_STL=c++_shared"
+                )
+                cppFlags += "-O3 -fexceptions -frtti"
+            }
+        }
+    }
+
+    // 本地大模型（libmodel.so）安装时解压到 nativeLibraryDir，llama.cpp 可直接 mmap
+    packaging {
+        jniLibs.useLegacyPackaging = true
+        resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/INDEX.LIST")
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     val ksPath = System.getenv("WENQU_KEYSTORE") ?: ""
@@ -49,9 +75,6 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
-    packaging {
-        resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/INDEX.LIST")
-    }
 }
 
 dependencies {

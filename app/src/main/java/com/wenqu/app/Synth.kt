@@ -11,6 +11,9 @@ object Synth {
 
     private val engJunk = Regex("(广告|下载APP|下载客户端|登录|注册|版权所有|免责声明|©|All Rights Reserved|点击|立即|快照)")
 
+    /** 联想/推荐板块词条：搜索引擎"相关搜索"“热门推荐”这种噪音，绝不能混进答案 */
+    private val assocJunk = Regex("(相关搜索|相关推荐|大家还在搜|还在搜|还在看|热门推荐|为你推荐|更多结果|查看更多|点击进入|立即查看|展开全部|收起|下一页|上一页|百度首页|必应首页|百度百科欢迎|词条统计|使用帮助|友情链接|分享到|扫码下载)")
+
     /** 定义句特征：以主体开头，或含"是/指/出生于/成立于/位于"等直接下定义的表达 */
     private val defRe = Regex(
         "(是指|指的是|，(原名|字)|原名|出生于|生于|毕业于|成立于|创立于|创办于|位于|坐落于|是一家|是一种|是一部|是一款|是一种|是一种|总部位于|主演|执导|编剧|歌手|演员|导演|主持人|企业家|科学家|作家|城市|省份|国家|大学|公司|品牌|软件|游戏|电影|电视剧|动画片?)"
@@ -31,8 +34,15 @@ object Synth {
             val src = r.snippet.ifBlank { r.title }
             Nlp.sentences(src).forEachIndexed { si, s ->
                 if (engJunk.containsMatchIn(s)) return@forEachIndexed
+                if (assocJunk.containsMatchIn(s)) return@forEachIndexed
+                // 联想问句碎片："孙悟空三打白骨精吗？"这种又短又带疑问词的标题式词条
+                if (s.length <= 16 && Regex("[吗呢啊？?]").containsMatchIn(s)) return@forEachIndexed
                 val cov = Nlp.coverage(toks, s)
-                if (cov < 0.15 && toks.size > 2) return@forEachIndexed  // 与问题几乎无关的句子直接丢
+                // 与问题几乎无关的句子直接丢（阈值提高：宁可少而准）
+                val minCov = if (toks.size > 2) 0.3 else 0.1
+                if (cov < minCov) return@forEachIndexed
+                // 主体词必须出现（或覆盖率极高），保证答案围绕问题本身
+                if (subject.length >= 2 && !s.contains(subject) && cov < 0.55) return@forEachIndexed
                 var sc = cov * 2.4
                 // 直接回答句大幅加分：主体开头 > 含主体 > 定义句式
                 if (subject.length >= 2) {

@@ -13,12 +13,14 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlin.random.Random
 
 /**
  * 问答总调度：
- * 意图路由 -> 时间/天气/闲聊/计算/游戏（本地秒答） / 图片 / 视频 / 链接 / 全网搜索
- * -> 多引擎并行 -> 抽取合成 -> 打字机流式输出 -> 落库持久化（上下文记忆永不丢）
+ * 意图路由 -> 时间/天气/闲聊/计算/游戏（本地秒答）/ 图片 / 视频 / 链接 / 全网搜索
+ * -> 多引擎并行 -> 相关性筛选 -> 本地大模型阅读理解式总结（流式生成，不走死模板）
+ * -> 模型不可用时回退规则合成 -> 落库持久化（上下文记忆永不丢）
  */
 object ChatRepo {
 
@@ -59,6 +61,7 @@ object ChatRepo {
         voice = Voice(ctx)
         refreshConvs()
         openLatestOrCreate()
+        Llm.boot() // 本地大模型后台加载，不阻塞 UI
     }
 
     fun refreshConvs() {
@@ -154,8 +157,24 @@ object ChatRepo {
             val route = IntentRouter.route(userText, conv, imageCtx, videoCtx, lastQuery)
             when (route) {
                 is Intent.SmallTalk -> {
-                    val reply = SmallTalk.lastReply
-                    if (reply == "__GAME_START__") startGuessGame(msgId) else finishText(msgId, reply)
+                    if (SmallTalk.lastReply == "__GAME_START__") {
+                        startGuessGame(msgId)
+                    } else {
+                        // 本地大模型实时生成个性化回复（结合最近几轮对话），失败回退模板
+                        val ctx = recentChatContext()
+                        val llmReply = if (Llm.ready && Prefs.llmEnabled)
+                            runCatching {
+                                withTimeout(60_000L) {
+                                    Llm.complete(
+                                        "你是「问渠」APP 的助手小渠，作者罗根。你平时帮用户查全网资料、找图找视频、报天气报时间。现在用户在和你闲聊，请用中文自然回应：1-3句话，活泼友好、口语化，可以带点小幽默，不要用列表，不要自我介绍一长串。结合上下文回复。",
+                                        (if (ctx.isNotEmpty()) "最近对话：\n$ctx\n\n" else "") + "用户说：$userText",
+                                        120, 0.9f
+                                    )
+                                }
+                            }.getOrNull()
+                        else null
+                        finishText(msgId, llmReply ?: SmallTalk.lastReply)
+                    }
                 }
                 is Intent.Time -> {
                     // 本地秒答优先；地点未知等无法本地回答时回落搜索
@@ -164,6 +183,16 @@ object ChatRepo {
                     else webFlow(msgId, Intent.Web(Nlp.stripPolite(route.q).ifEmpty { route.q }))
                 }
                 is Intent.WeatherQ -> {
+                    // 先判断是否说了地点：没说地点 → 反问澄清（这是正确行为，绝不乱搜）
+                    val place = Weather.extractPlace(route.q)
+                    if (place.isEmpty() && !route.q.contains(Regex("[的]\\s*(今天|明天)"))) {
+                        Db.touchConv(currentConvId, gameState = "clarify:weather")
+                        finishText(
+                            msgId,
+                            "你想知道哪个地方的天气呀？告诉我地名就行，比如「保山」「上海」或「云南腾冲」，我马上帮你查实时天气。"
+                        )
+                        return
+                    }
                     // 开源气象接口秒答；失败绝不拿"XX天气"去搜资讯（会跑题），诚实重试
                     val w = runCatching { Weather.tryAnswer(route.q) }.getOrNull()
                     if (w != null) finishText(msgId, w)
@@ -172,6 +201,7 @@ object ChatRepo {
                         "天气服务这会儿没连上（开源气象接口临时无响应），小渠不瞎编天气。\n\n点下面「再试一次」我立刻重连气象接口；或者过几分钟再来问我。",
                         suggestions = listOf("再试一次")
                     )
+                    Db.touchConv(currentConvId, gameState = "")
                 }
                 is String -> if (route.startsWith("GUESS:")) guessStep(msgId, route.removePrefix("GUESS:").toIntOrNull() ?: 50, conv)
                 is Intent.GameQuit -> {
@@ -188,7 +218,7 @@ object ChatRepo {
                             "你上一句问的是：「${prev}」\n\n想让我继续深挖这个话题就说「继续查」，或者直接抛新问题给我。"
                     )
                 }
-                is Intent.Math -> finishText(msgId, MathEval.answerText(route.expr, route.result))
+                is Intent.Math -> mathFlow(msgId, userText, route)
                 is Intent.Image -> imageFlow(msgId, route.q, route.more, route.count)
                 is Intent.Video -> videoFlow(msgId, route.q, route.more, route.count)
                 is Intent.Url -> urlFlow(msgId, route.brand)
@@ -199,7 +229,70 @@ object ChatRepo {
         }
     }
 
-    // ---------------- 全网搜索 ----------------
+    /** 最近几轮对话（供闲聊 LLM 结合上下文） */
+    private fun recentChatContext(): String {
+        return try {
+            Db.messages(currentConvId).takeLast(6)
+                .filter { it.text.isNotBlank() }
+                .joinToString("\n") { m -> (if (m.role == 0) "用户：" else "小渠：") + m.text.take(80) }
+        } catch (_: Exception) { "" }
+    }
+
+    /** 口算：本地精确计算保底；若用户附加了语气/风格条件，由本地大模型按要求润色（数值绝不改动） */
+    private suspend fun mathFlow(msgId: Long, userText: String, route: Intent.Math) {
+        val base = MathEval.answerText(route.expr, route.result)
+        val style = Nlp.styleReq(userText)
+        if (style != null && Llm.ready) {
+            val t = runCatching {
+                withTimeout(60_000L) {
+                    Llm.complete(
+                        "你是「问渠」APP 的助手小渠。用户问了一个计算题并指定了回答风格。题目已经过本地精确计算，结果是唯一正确答案：" +
+                                "${route.expr} = ${route.result}。请严格用「$style」的语气风格，用1-3句话自然地告诉用户答案。" +
+                                "铁律：数值必须等于 $route.result，绝不能改变数值，也不要发明其他数字。",
+                        "用户题目：$userText",
+                        130, 0.8f
+                    )
+                }
+            }.getOrNull()
+            if (t != null) {
+                finishText(msgId, "$t\n\n（本地精确计算：${route.expr} = ${route.result}）")
+                return
+            }
+        }
+        finishText(msgId, base)
+    }
+
+    // ---------------- 全网搜索（本地大模型总结） ----------------
+
+    /** 从排序结果中提炼候选句（强相关性过滤：联想词条/问句碎片/低覆盖全丢），给 LLM 做材料 */
+    private fun buildMaterials(q: String, ranked: List<WebResult>): Pair<String, List<SourceRef>> {
+        val toks = Nlp.tokens(q)
+        val subject = q.replace(Regex("(是谁|是什么|什么意思|的简介|简介|介绍(一下)?|是谁啊|是谁呢|是谁\\?*|啥情况|怎么样|如何|什么|哪些)"), "").trim()
+        val junkRe = Regex("(相关搜索|相关推荐|大家还在搜|还在搜|还在看|热门推荐|为你推荐|更多结果|查看更多|点击进入|立即查看|展开全部|收起|下一页|上一页|百度首页|必应首页|百度百科欢迎|版权所有|免责声明|京ICP|ICP备|登录|注册|下载APP|客户端)")
+        val refs = ArrayList<SourceRef>()
+        val blocks = ArrayList<String>()
+        val seenHost = HashMap<String, Int>()
+
+        for (r in ranked) {
+            if (blocks.size >= 8) break
+            val h = Nlp.hostOf(r.url)
+            if ((seenHost[h] ?: 0) >= 2) continue
+            val src = r.snippet.ifBlank { r.title }
+            val sents = Nlp.sentences(src).filter { s ->
+                s.length in 12..160 &&
+                        !junkRe.containsMatchIn(s) &&
+                        // 联想问句碎片："孙悟空三打白骨精吗？"这种又短又带问的
+                        !(s.length <= 16 && Regex("[吗呢]").containsMatchIn(s)) &&
+                        (subject.length < 2 || s.contains(subject) || Nlp.coverage(toks, s) >= 0.45)
+            }
+            if (sents.isEmpty()) continue
+            val idx = refs.indexOfFirst { it.host == h }.let { if (it >= 0) it else refs.size }
+            if (idx == refs.size) refs.add(SourceRef(Nlp.shorten(r.title, 16), r.url, r.engine, h))
+            blocks.add("[${idx + 1}]（${h}）" + sents.take(3).joinToString(""))
+            seenHost[h] = (seenHost[h] ?: 0) + 1
+        }
+        return blocks.take(8).joinToString("\n\n") to refs
+    }
 
     private suspend fun webFlow(msgId: Long, intent: Intent.Web) {
         val q = intent.q
@@ -218,15 +311,6 @@ object ChatRepo {
         }
         val (ranked, states) = agg.searchWeb(q, engines, per, intent.deep)
 
-        if (ranked.isEmpty()) {
-            finishText(
-                msgId, Synth.failText(states.count { it.state == 1 }),
-                suggestions = listOf("再试一次", "换个说法再问"),
-                query = q
-            )
-            return
-        }
-
         // 主动配图：涉及人物/地点/事物的介绍类问题，顺带附图帮助理解
         var imgs = emptyList<MediaResult>()
         if (Prefs.autoImages && q.length <= 25 &&
@@ -240,8 +324,6 @@ object ChatRepo {
             vids = runCatching { VideoSearcher.search(q, 1, 4) }.getOrDefault(emptyList())
         }
 
-        val out = Synth.compose(q, ranked, states, intent.deep, intent.reanswer)
-
         imageCtx = false; videoCtx = false
         if (imgs.isNotEmpty()) {
             imageCtx = true; imageQ = q; imageTurn = 0
@@ -254,11 +336,64 @@ object ChatRepo {
             vids.forEach { videoSeen.add(it.page) }
         }
 
+        if (ranked.isEmpty()) {
+            finishText(
+                msgId, Synth.failText(states.count { it.state == 1 }),
+                suggestions = listOf("再试一次", "换个说法再问"),
+                query = q
+            )
+            Db.touchConv(currentConvId, lastQuery = q)
+            return
+        }
+
+        // ---- 本地大模型：阅读理解式总结（流式） ----
+        if (Llm.ready && Prefs.llmEnabled) {
+            val (materials, refs) = buildMaterials(q, ranked)
+            if (materials.isNotEmpty()) {
+                update(msgId) {
+                    it.copy(
+                        text = "",
+                        searching = false,
+                        streaming = true,
+                        engineStates = emptyList()
+                    )
+                }
+                val sys = "你是「问渠」APP 的回答整理引擎，叫小渠。用户给你一个问题和若干带编号的搜索材料。" +
+                        "要求：\n" +
+                        "1. 只回答问题本身：先直接给出答案（定义/结论/数字），再补充必要细节；\n" +
+                        "2. 材料里与问题无关的内容（广告、相关推荐、其他新闻、别的词条）一律忽略，绝不能混进答案；\n" +
+                        "3. 用中文回答，2-5句话，连贯自然像人说话，不要罗列要点符号，不要用「根据搜索结果」这类开头；\n" +
+                        "4. 材料里没有的信息绝不能编造；\n" +
+                        "5. 如果材料确实答不了这个问题，用一两句话诚实说明材料里有什么、缺什么。\n" +
+                        "只输出回答正文。"
+                val usr = "问题：$q\n\n搜索材料：\n$materials"
+                val t = runCatching {
+                    withTimeout(120_000L) {
+                        Llm.complete(sys, usr, 260, 0.7f) { partial ->
+                            update(msgId) { it.copy(text = partial) }
+                        }
+                    }
+                }.getOrNull()
+                if (!t.isNullOrBlank()) {
+                    val sugg = buildList {
+                        add("再查查")
+                        if (imgs.isNotEmpty()) add("换一批") else add("换个说法再问")
+                    }
+                    finishRaw(msgId, t.trim(), refs, imgs, vids, q, suggestions = sugg)
+                    Db.touchConv(currentConvId, lastQuery = q)
+                    return
+                }
+                // 模型失败 → 走下面的规则合成兜底
+            }
+        }
+
+        // ---- 规则合成兜底（模型不可用/失败时，仍保证"总结一个答案"而不是罗列网页） ----
+        val out = Synth.compose(q, ranked, states, intent.deep, intent.reanswer)
         finishText(msgId, out.text, out.sources, out.suggestions, imgs, vids, q)
         Db.touchConv(currentConvId, lastQuery = q)
     }
 
-    // ---------------- 图片 ----------------
+    // ---------------- 图片（多主体支持） ----------------
 
     /** 从池里取未展示过的 n 张（换一批不重复、不超页打叉） */
     private fun freshImages(n: Int): List<MediaResult> {
@@ -272,13 +407,20 @@ object ChatRepo {
         return out
     }
 
+    /**
+     * 多主体图片："孙悟空和熊出没的图片" → 两个主体并行搜、交错展示、每张标注主体。
+     * 单主体行为不变；数量均分到各主体（每主体至少2张）。
+     */
     private suspend fun imageFlow(msgId: Long, q: String, more: Boolean, count: Int) {
         val query = (if (more && imageQ.isNotEmpty()) imageQ else q).ifEmpty { "风景壁纸" }
         val want = if (count in 1..12) count else 6
+        val subjects = if (more) imageSubjects.ifEmpty { Nlp.splitSubjects(query).ifEmpty { listOf(query) } }
+                       else Nlp.splitSubjects(query).ifEmpty { listOf(query) }
         if (!more || query != imageQ) {
             imageQ = query; imageTurn = 0
             imageSeen.clear(); imagePool = emptyList()
         }
+        imageSubjects = subjects
         imageCtx = true
         videoCtx = false
 
@@ -290,43 +432,65 @@ object ChatRepo {
             val offset = imageTurn * 30
             imageTurn++
 
-            val states = mutableListOf(
-                EngineProgress("bingimg", "必应图片", 0, 0),
-                EngineProgress("baiduimg", "百度图片", 0, 0),
-                EngineProgress("sogouimg", "搜狗图片", 0, 0),
-                EngineProgress("soimg", "360图片", 0, 0)
-            )
-            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$query」的图片…") }
+            val sources = listOf("bingimg" to "必应图片", "baiduimg" to "百度图片", "sogouimg" to "搜狗图片", "soimg" to "360图片")
+            val states = mutableListOf<EngineProgress>()
+            sources.forEach { (id, name) -> states.add(EngineProgress(id, name, 0, 0)) }
+            val label = subjects.joinToString("、")
+            update(msgId) { it.copy(engineStates = states.toList(), text = "正在全网找「$label」的图片…") }
 
             coroutineScope {
-                val j1 = async { runCatching { ImageSearcher.fromBing(query, offset, 30) }.getOrDefault(emptyList()) }
-                val j2 = async { runCatching { ImageSearcher.fromBaidu(query, offset, 30) }.getOrDefault(emptyList()) }
-                val j3 = async { runCatching { ImageSearcher.fromSogou(query, offset, 30) }.getOrDefault(emptyList()) }
-                val j4 = async { runCatching { ImageSearcher.fromSo360(query, offset, 30) }.getOrDefault(emptyList()) }
-                val l1 = j1.await(); val l2 = j2.await(); val l3 = j3.await(); val l4 = j4.await()
-                setImgState(msgId, states, "bingimg", l1.size)
-                setImgState(msgId, states, "baiduimg", l2.size)
-                setImgState(msgId, states, "sogouimg", l3.size)
-                setImgState(msgId, states, "soimg", l4.size)
-                imagePool = imagePool + l1 + l2 + l3 + l4
+                class JobRef(val subj: String, val eid: String)
+                val jobs = ArrayList<Pair<JobRef, kotlinx.coroutines.Deferred<List<MediaResult>>>>()
+                for (s in subjects) {
+                    jobs.add(JobRef(s, "bingimg") to async { runCatching { ImageSearcher.fromBing(s, offset, 30) }.getOrDefault(emptyList()) })
+                    jobs.add(JobRef(s, "baiduimg") to async { runCatching { ImageSearcher.fromBaidu(s, offset, 30) }.getOrDefault(emptyList()) })
+                    jobs.add(JobRef(s, "sogouimg") to async { runCatching { ImageSearcher.fromSogou(s, offset, 30) }.getOrDefault(emptyList()) })
+                    jobs.add(JobRef(s, "soimg") to async { runCatching { ImageSearcher.fromSo360(s, offset, 30) }.getOrDefault(emptyList()) })
+                }
+                // 收集：按主体分组 → 主体间 round-robin 交错 → 保证"孙悟空、熊出没"各占一半而非只出一种
+                val bySubject = LinkedHashMap<String, MutableList<MediaResult>>()
+                jobs.forEach { (ref, job) ->
+                    val list = job.await()
+                    setImgState(msgId, states, ref.eid, list.size)
+                    bySubject.getOrPut(ref.subj) { mutableListOf() }.addAll(list)
+                }
+                val iters = bySubject.entries.map { (subj, l) ->
+                    val seenS = HashSet<String>()
+                    subj to l.filter { it.image.isNotEmpty() && seenS.add(it.image) }.iterator()
+                }
+                var added = true
+                while (added) {
+                    added = false
+                    for ((subj, itp) in iters) {
+                        if (itp.hasNext()) {
+                            imagePool = imagePool + itp.next().copy(extra = subj)
+                            added = true
+                        }
+                    }
+                }
             }
             shown = shown + freshImages(want - shown.size)
         }
 
         val show = shown.take(want)
         if (show.isEmpty()) {
-            finishText(msgId, Synth.imageFail(query), suggestions = listOf("再试一次", "换个关键词找图"), query = query)
+            finishText(msgId, Synth.imageFail(labelOf(subjects)), suggestions = listOf("再试一次", "换个关键词找图"), query = query)
         } else {
-            finishText(msgId, Synth.imageIntro(query, show.size, want), images = show, query = query)
+            finishText(msgId, Synth.imageIntro(labelOf(subjects), show.size, want), images = show, query = query)
             Db.touchConv(currentConvId, lastQuery = query)
         }
     }
+
+    private var imageSubjects = listOf<String>()
+
+    private fun labelOf(subjects: List<String>): String = subjects.joinToString(" & ")
 
     private fun setImgState(msgId: Long, states: MutableList<EngineProgress>, id: String, count: Int) {
         synchronized(states) {
             val i = states.indexOfFirst { it.id == id }
             if (i >= 0) {
-                states[i] = states[i].copy(state = if (count > 0) 1 else 2, count = count)
+                val total = (states[i].count) + count
+                states[i] = states[i].copy(state = if (total > 0) 1 else 2, count = total)
                 val snapshot = states.toList()
                 update(msgId) { it.copy(engineStates = snapshot) }
             }
@@ -374,8 +538,8 @@ object ChatRepo {
                 val j1 = async { runCatching { VideoSearcher.fromBilibili(query, page, 10) }.getOrDefault(emptyList()) }
                 val j2 = async { runCatching { VideoSearcher.fromBing(query, 12) }.getOrDefault(emptyList()) }
                 val l1 = j1.await(); val l2 = j2.await()
-                setImgState(msgId, states, "bili", l1.size)
-                setImgState(msgId, states, "bingvid", l2.size)
+                setVidState(msgId, states, "bili", l1.size)
+                setVidState(msgId, states, "bingvid", l2.size)
                 videoPool = videoPool + l1 + l2
             }
             shown = shown + freshVideos(want - shown.size)
@@ -387,6 +551,17 @@ object ChatRepo {
         } else {
             finishText(msgId, Synth.videoIntro(query, show.size), videos = show, query = query)
             Db.touchConv(currentConvId, lastQuery = query)
+        }
+    }
+
+    private fun setVidState(msgId: Long, states: MutableList<EngineProgress>, id: String, count: Int) {
+        synchronized(states) {
+            val i = states.indexOfFirst { it.id == id }
+            if (i >= 0) {
+                states[i] = states[i].copy(state = if (count > 0) 1 else 2, count = states[i].count + count)
+                val snapshot = states.toList()
+                update(msgId) { it.copy(engineStates = snapshot) }
+            }
         }
     }
 
@@ -450,6 +625,37 @@ object ChatRepo {
     private fun mergeStates(old: List<EngineProgress>, p: EngineProgress): List<EngineProgress> {
         val i = old.indexOfFirst { it.id == p.id }
         return if (i >= 0) old.toMutableList().apply { this[i] = p } else old + p
+    }
+
+    /** 直接落库完成（LLM 已流式输出过，不再重复打字机） */
+    private suspend fun finishRaw(
+        msgId: Long,
+        text: String,
+        sources: List<SourceRef>,
+        images: List<MediaResult>,
+        videos: List<MediaResult>,
+        query: String,
+        suggestions: List<String> = emptyList()
+    ) {
+        update(msgId) {
+            it.copy(
+                text = text, streaming = false, searching = false,
+                sources = sources, images = images, videos = videos,
+                suggestions = suggestions,
+                query = query
+            )
+        }
+        val meta = Db.metaOf(
+            UiMessage(0, 1, text, suggestions = suggestions, sources = sources, images = images, videos = videos, query = query)
+        )
+        if (msgId < 0) {
+            val real = Db.insertMessage(currentConvId, 1, text, meta)
+            update(msgId) { it.copy(id = real) }
+        } else {
+            Db.updateMessage(msgId, text, meta)
+        }
+        Db.touchConv(currentConvId)
+        voice.say(text)
     }
 
     private suspend fun finishText(

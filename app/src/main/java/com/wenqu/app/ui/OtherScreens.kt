@@ -55,6 +55,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -184,6 +185,7 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
     var voice by remember { mutableStateOf(Prefs.voiceEnabled) }
     var deep by remember { mutableStateOf(Prefs.deepDefault) }
     var autoImg by remember { mutableStateOf(Prefs.autoImages) }
+    var llm by remember { mutableStateOf(Prefs.llmEnabled) }
     var theme by remember { mutableIntStateOf(Prefs.themeMode) }
     var customs by remember { mutableStateOf(Prefs.customEngines()) }
     var engineIds by remember { mutableStateOf(Prefs.enabledEngineIds()) }
@@ -235,6 +237,33 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
             SettingRow("智能配图配视频", "回答人物/地点/教程类问题时自动附上相关图片视频") {
                 Switch(checked = autoImg, onCheckedChange = { autoImg = it; Prefs.autoImages = it })
             }
+        }
+
+        SettingCard("本地大模型（随 APK 离线内置，不用联网也能读懂材料总结答案）") {
+            val st by com.wenqu.app.Llm.state.collectAsState()
+            val (statusText, statusColor) = when (st) {
+                is com.wenqu.app.Llm.St.Ready -> "已就绪 · 回答由它实时总结生成" to Color(0xFF16A34A)
+                is com.wenqu.app.Llm.St.Loading -> "正在加载（首次约几秒到十几秒）…" to MaterialTheme.colorScheme.onSurfaceVariant
+                is com.wenqu.app.Llm.St.Init -> "等待加载…" to MaterialTheme.colorScheme.onSurfaceVariant
+                is com.wenqu.app.Llm.St.Failed -> "不可用（内存不足或机型不支持），已自动回退到规则整理" to MaterialTheme.colorScheme.error
+            }
+            Text(statusText, fontSize = 12.sp, color = statusColor)
+            Spacer(Modifier.height(6.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("本地大模型总结回答", fontSize = 14.sp)
+                    Text("开启后回答更聪明、直接给结论；关闭则用内置规则整理", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = llm, onCheckedChange = { llm = it; Prefs.llmEnabled = it })
+            }
+            Text(
+                "模型：Qwen2.5-0.5B（开源，Apache-2.0），纯本地推理不上传任何数据；首次回答可能需要热身，之后速度会快很多。",
+                fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 17.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
 
         SettingCard("主题外观") {
@@ -306,7 +335,7 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
         }
 
         SettingCard("关于") {
-            Text("问渠 WenQu v1.1", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("问渠 WenQu v1.3", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text("作者：罗根", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             Text(
@@ -314,7 +343,7 @@ fun SettingsScreen(onBack: () -> Unit, onThemeChanged: (Int) -> Unit) {
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
             )
             Text(
-                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines。",
+                "开源组件：Jetpack Compose、Material 3、OkHttp、Jsoup、Coil、Kotlin Coroutines、llama.cpp、Qwen2.5。",
                 fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 18.sp
             )
             Text(
@@ -407,7 +436,12 @@ private fun SettingRow(title: String, sub: String, trailing: @Composable () -> U
 private const val DESKTOP_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-/** 内置浏览器：系统 WebView，直接打开任何高亮链接 */
+private const val MOBILE_WEB_UA =
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+
+/** 内置浏览器：系统 WebView，直接打开任何高亮链接。
+ *  加固：拦截 intent://等唤端 scheme（避免 B站拉起 APP 失败后报"网页无法打开"）、
+ *  仅主帧错误才显示错误页（子资源失败不影响正文）、自动播放、移动端 UA。 */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun WebViewScreen(url: String, onClose: () -> Unit) {
@@ -417,6 +451,8 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
     var current by remember { mutableStateOf(url) }
     var desktop by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf(url) }
+    var mainFrameError by remember { mutableStateOf(false) }
+    var retried by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Row(
@@ -443,7 +479,7 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
             )
             IconButton(onClick = {
                 desktop = !desktop
-                webView?.settings?.userAgentString = if (desktop) DESKTOP_UA else null
+                webView?.settings?.userAgentString = if (desktop) DESKTOP_UA else MOBILE_WEB_UA
                 webView?.reload()
             }) {
                 Icon(
@@ -451,7 +487,10 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
                     null, modifier = Modifier.size(20.dp)
                 )
             }
-            IconButton(onClick = { webView?.reload() }) {
+            IconButton(onClick = {
+                mainFrameError = false
+                webView?.reload()
+            }) {
                 Icon(Icons.Default.Refresh, null, modifier = Modifier.size(20.dp))
             }
             IconButton(onClick = {
@@ -469,18 +508,58 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
                 trackColor = Color.Transparent
             )
         }
+        if (mainFrameError) {
+            Column(
+                Modifier.fillMaxSize().padding(30.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("这个网页没能加载出来", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "可能是站点临时抽风、需要登录或反爬拦截。可以先试下面的办法：",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 19.sp
+                )
+                Spacer(Modifier.height(18.dp))
+                Row {
+                    TextButton(onClick = {
+                        mainFrameError = false
+                        retried = true
+                        // B站等站点主帧失败时换移动版域名重试一次
+                        val fallback = if (current.contains("bilibili.com/video"))
+                            current.replace("www.bilibili.com", "m.bilibili.com") else current
+                        webView?.loadUrl(fallback)
+                    }) { Text("换姿势重试") }
+                    Spacer(Modifier.size(10.dp))
+                    TextButton(onClick = {
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(current)))
+                        } catch (_: Exception) {}
+                    }) { Text("用系统浏览器打开") }
+                    Spacer(Modifier.size(10.dp))
+                    TextButton(onClick = onClose) { Text("返回") }
+                }
+            }
+        } else {
         AndroidView(
             factory = { ctx ->
                 WebView(ctx).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     settings.builtInZoomControls = true
                     settings.displayZoomControls = false
                     settings.loadWithOverviewMode = true
                     settings.useWideViewPort = true
+                    settings.userAgentString = MOBILE_WEB_UA
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                            val scheme = request.url.scheme?.lowercase() ?: ""
+                            // 非网页 scheme（intent://、bilibili://、taobao://…）一律拦截：
+                            // 交给 WebView 加载只会报 ERR_UNKNOWN_URL_SCHEME，整页变成"网页无法打开"
+                            if (scheme != "http" && scheme != "https") return true
                             current = request.url.toString()
                             input = current
                             return false
@@ -488,6 +567,10 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
                         override fun onPageFinished(view: WebView, u: String?) {
                             current = u ?: current
                             input = current
+                        }
+                        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
+                            // 只有主帧失败才亮错误页；子资源（封面/统计脚本）失败不影响正文
+                            if (request.isForMainFrame) mainFrameError = true
                         }
                     }
                     webChromeClient = object : WebChromeClient() {
@@ -501,6 +584,7 @@ fun WebViewScreen(url: String, onClose: () -> Unit) {
             },
             modifier = Modifier.weight(1f)
         )
+        }
     }
     BackHandler {
         val w = webView

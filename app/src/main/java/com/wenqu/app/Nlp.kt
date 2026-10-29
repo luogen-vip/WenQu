@@ -148,6 +148,43 @@ object Nlp {
         return 0
     }
 
+    /**
+     * 多主体拆分："孙悟空和熊出没的图片" / "熊出没的、光头强的" / "找孙悟空还有光头强的图"
+     * → ["孙悟空", "熊出没"] / ["熊出没", "光头强"]
+     * 先提取去指令，再按连接词切分；最多 4 个主体，每个至少 1 字。
+     */
+    fun splitSubjects(q: String): List<String> {
+        val core = extractTopic(q)
+        if (core.isEmpty()) return emptyList()
+        val parts = core.split(Regex("和|还有|还有个|跟|与|以及|、|，|,|/|＋|\\+"))
+            .map { it.trim('的', '了', '，', ' ', '、', '/', ' ') }
+            .filter { it.isNotEmpty() && it.length <= 20 }
+            .distinct()
+        // "孙悟空和熊出没"只有一段被和字切开；若切出来只剩一段则退回整体
+        if (parts.isEmpty()) return listOf(core)
+        return parts.take(4)
+    }
+
+    /**
+     * 识别用户在问题里附加的语气/风格条件：
+     * "用幽默的语句回答 1+1 等于多少" → "幽默"
+     * 返回 null 表示没有附加风格要求。
+     */
+    fun styleReq(q: String): String? {
+        val m = Regex("(幽默|幽黙|搞笑|风趣|诙谐|俏皮|逗比|正经|严肃|认真|简短|简单|详细|通俗易懂|大白话|文言|文言文|古风|诗意|浪漫|文艺|专业|正式|高冷|温柔|可爱|童趣|儿童|像小孩|小学生|一句话|长一点|短一点)").find(q) ?: return null
+        val w = m.value
+        return when {
+            w.contains("文言") -> "文言文"
+            w.contains("古风") -> "古风"
+            w.contains("诗意") || w.contains("浪漫") || w.contains("文艺") -> "诗意浪漫"
+            w.contains("通俗") || w.contains("大白话") -> "通俗易懂"
+            w.contains("童趣") || w.contains("儿童") || w.contains("小孩") || w.contains("小学生") -> "面向小学生的活泼口吻"
+            w.contains("简短") || w.contains("短一点") || w.contains("一句话") -> "非常简短"
+            w.contains("详细") || w.contains("长一点") -> "详细一些"
+            else -> w
+        }
+    }
+
     fun chineseNum(s: String): Int {
         val digits = mapOf(
             '零' to 0, '一' to 1, '二' to 2, '两' to 2, '三' to 3, '四' to 4,

@@ -33,6 +33,11 @@ object Prefs {
         get() = sp.getBoolean("autoimg", true)
         set(v) = sp.edit().putBoolean("autoimg", v).apply()
 
+    /** 本地大模型总结回答（默认开；关闭后回答走内置规则合成） */
+    var llmEnabled: Boolean
+        get() = sp.getBoolean("llm", true)
+        set(v) = sp.edit().putBoolean("llm", v).apply()
+
     fun enabledEngineIds(): MutableSet<String> {
         val all = Engines.allIds().toSet()
         return LinkedHashSet(sp.getStringSet("engines", all) ?: all)

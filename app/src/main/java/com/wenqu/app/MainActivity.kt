@@ -60,9 +60,12 @@ private fun AppRoot(onThemeChanged: (Int) -> Unit) {
     val stack = remember { mutableStateListOf<Screen>(Screen.Chat) }
     val push: (Screen) -> Unit = { stack.add(it) }
     val pop: () -> Unit = { if (stack.size > 1) stack.removeAt(stack.size - 1) }
+    // 聊天列表滚动状态提升到根：点视频/图片进网页再返回，聊天页位置纹丝不动
+    val chatListState = androidx.compose.foundation.lazy.rememberLazyListState()
 
     when (val s = stack.last()) {
         is Screen.Chat -> ChatScreen(
+            listState = chatListState,
             onOpenQuick = { push(Screen.QuickSearch) },
             onOpenSettings = { push(Screen.Settings) },
             onOpenLink = { push(Screen.Web(it)) }
